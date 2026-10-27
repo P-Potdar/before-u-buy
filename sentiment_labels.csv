@@ -1,0 +1,31 @@
+case_id,text,label
+S01,I feel excited about trying this item,positive
+S02,I love how these headphones sound,positive
+S03,I am happy with the idea of replacing my old chair,positive
+S04,I want this because it solves a problem,positive
+S05,The design makes me feel joyful,positive
+S06,I enjoy using products like this,positive
+S07,I like the design of this bag,positive
+S08,I am looking forward to using this,positive
+S09,This purchase makes me feel enthusiastic,positive
+S10,I am pleased about finding this option,positive
+S11,I feel stressed about spending this much,negative
+S12,I am anxious about this purchase,negative
+S13,I am worried I may regret this,negative
+S14,This decision makes me sad,negative
+S15,I regret buying things under pressure,negative
+S16,I feel pressured by the sale,negative
+S17,I had an emotional week and feel uncertain,negative
+S18,I am nervous about the cost,negative
+S19,I am angry that the price went up,negative
+S20,This situation feels frustrating,negative
+S21,These headphones cost 8000 rupees,neutral
+S22,I am comparing two models,neutral
+S23,Maybe I will use it every week,neutral
+S24,My current headphones work fine,neutral
+S25,The sale ends on Friday,neutral
+S26,I do not know if I need it,neutral
+S27,A colleague mentioned this product,neutral
+S28,I could wait until next month,neutral
+S29,There are several options available,neutral
+S30,I am still thinking about the purchase,neutral

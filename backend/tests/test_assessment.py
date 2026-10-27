@@ -1,0 +1,85 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from main import AssessmentInput, evaluate
+import pytest
+
+
+def test_budget_overrun_flags_review():
+    result = evaluate(AssessmentInput(name="Headphones", price=20000, budget=15000, recurring_monthly=500))
+    assert result.recommendation == "Review the entered budget figures"
+    assert result.budget_exceeded_by == 11000
+
+
+def test_zero_recurring_cost_and_valid_cost_per_use():
+    result = evaluate(AssessmentInput(name="Lamp", price=1000, frequency="Daily", lifespan_years=2))
+    assert result.recurring_12_month_total == 0
+    assert result.estimated_cost_per_use == pytest.approx(1000 / 730, abs=0.0001)
+
+
+def test_blank_name_is_rejected():
+    with pytest.raises(ValueError):
+        AssessmentInput(name="   ", price=1)
+
+
+def test_negative_price_is_rejected():
+    with pytest.raises(ValueError):
+        AssessmentInput(name="Item", price=-10)
+
+
+def test_working_alternative_and_promo_urgency_add_caution():
+    result = evaluate(AssessmentInput(name="Upgrade", price=1000, current="I have something that works", urgency="A sale or countdown"))
+    assert result.recommendation == "Some factors may merit reflection"
+    assert any("urgency" in f.lower() for f in result.factors)
+
+
+def test_cost_per_use_is_missing_until_usage_is_supplied():
+    result = evaluate(AssessmentInput(name="Item", price=8000))
+    assert result.estimated_cost_per_use is None
+    assert any("frequency" in item.lower() for item in result.missing_inputs)
+
+
+def test_zero_usage_or_lifespan_is_rejected():
+    with pytest.raises(ValueError):
+        AssessmentInput(name="Item", price=10, uses_per_week=0, lifespan_years=2)
+    with pytest.raises(ValueError):
+        AssessmentInput(name="Item", price=10, uses_per_week=2, lifespan_years=0)
+
+
+def test_omitted_currency_is_reported_as_a_default():
+    result = evaluate(AssessmentInput(name="Item", price=10))
+    assert result.defaults_applied == ["currency"]
+
+
+def test_five_uses_weekly_for_two_years_calculates_520_uses():
+    result = evaluate(AssessmentInput(
+        name="Headphones", price=8000, uses_per_week=5, lifespan_years=2
+    ))
+    assert result.estimated_total_uses == 520
+    assert result.estimated_cost_per_use == pytest.approx(8000 / 520, abs=0.0001)
+
+
+def test_explicit_stress_and_social_pressure_are_described_without_diagnosis():
+    result = evaluate(AssessmentInput(
+        name="Headphones",
+        price=8000,
+        scenario="They are trending and I had a stressful week",
+    ))
+    assert "social pressure" in result.sentiment["emotional_cues"]
+    assert "stress" in result.sentiment["emotional_cues"]
+    assert "wellbeing" in result.sentiment["limitation"]
+
+
+def test_risk_score_is_bounded_and_explained():
+    result = evaluate(AssessmentInput(
+        name="Headphones",
+        price=8000,
+        scenario="I feel stressed because they are trending",
+        current="I have something that works",
+        need="Mostly a want",
+        urgency="Social pressure or FOMO",
+        budget=100,
+    ))
+    assert 0 <= result.regret_risk["score"] <= 100
+    assert result.regret_risk["factors"]
+    assert "not a probability" in result.regret_risk["explanation"]
