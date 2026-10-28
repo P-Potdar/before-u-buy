@@ -373,8 +373,9 @@ def test_chat_progressively_updates_facts_scores_and_usage_calculation(monkeypat
     assert second["session_facts"]["existing_ownership"] is True
     assert second["session_facts"]["current_condition"] == "works"
     assert second["decision_state"]["regret_risk"]["score"] > first["decision_state"]["regret_risk"]["score"]
-    assert "strong stated pressure" in second["decision_state"]["signal_explanation"].casefold()
-    assert "budget figure" not in second["decision_state"]["signal_explanation"]
+    assert second["decision_state"]["signal"] == second["decision_state"]["recommendation"]
+    assert "external pressure" in second["decision_state"]["recommendation_explanation"].casefold()
+    assert "budget figure" not in second["decision_state"]["recommendation_explanation"]
     assert second["reply"].count("?") <= 1
 
     corrected = client.post("/api/chat", json={
@@ -407,7 +408,7 @@ def test_chat_conflicting_price_requires_explicit_correction(monkeypatch):
         "session_id": session_id,
     }).json()
     assert "price" in main.chat_facts[session_id]["conflicts"]
-    assert conflict["decision_state"]["signal"] == "INSUFFICIENT INFORMATION"
+    assert conflict["decision_state"]["signal"] == "WAIT"
     assert conflict["assessment_update"] is None
 
     corrected = client.post("/api/chat", json={
@@ -424,14 +425,15 @@ def test_decision_signal_requires_enough_explicit_evidence(monkeypatch):
         "message": "I am thinking about headphones.",
         "session_id": "incomplete-decision-signal",
     }).json()
-    assert incomplete["decision_state"]["signal"] == "INSUFFICIENT INFORMATION"
+    assert incomplete["decision_state"]["signal"] == "WAIT"
     assert incomplete["decision_state"]["provisional"] is True
 
     sufficiently_supported = client.post("/api/chat", json={
         "message": "This is an essential need. My current headphones are broken. Headphones cost ₹8000 and my budget is ₹10000.",
         "session_id": "supported-decision-signal",
     }).json()
-    assert sufficiently_supported["decision_state"]["signal"] == "BUY"
+    assert sufficiently_supported["decision_state"]["signal"] == "WAIT"
+    assert sufficiently_supported["decision_state"]["provisional"] is True
     assert sufficiently_supported["decision_state"]["budget_exceeded_by"] == 0
     assert "not a validated prediction" in sufficiently_supported["decision_state"]["limitations"]
 

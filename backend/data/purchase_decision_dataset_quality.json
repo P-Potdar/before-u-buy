@@ -1,0 +1,38 @@
+{
+  "dataset_version": "2.0.0",
+  "record_count": 2048,
+  "unique_id_count": 2048,
+  "unique_text_count": 2048,
+  "categories": {
+    "appliances": 128,
+    "audio": 128,
+    "computers": 128,
+    "education": 128,
+    "fitness": 128,
+    "furniture": 128,
+    "gaming": 128,
+    "kitchen": 128,
+    "peripherals": 128,
+    "phones": 128,
+    "photography": 128,
+    "productivity": 128,
+    "subscriptions": 128,
+    "tablets": 128,
+    "travel": 128,
+    "work-equipment": 128
+  },
+  "recommended_actions": {
+    "BUY": 64,
+    "DON'T BUY": 34,
+    "WAIT": 1950
+  },
+  "record_origins": {
+    "synthetic": 2048
+  },
+  "validation_failures": [],
+  "valid": true,
+  "near_duplicate_threshold": 0.92,
+  "near_duplicate_pair_count_capped_at": 100,
+  "near_duplicate_pairs": [],
+  "near_duplicate_observed_count": 0
+}

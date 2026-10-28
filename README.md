@@ -1,12 +1,16 @@
 # BeforeYouBuy AI
 
-A neutral, local-first purchase reflection app. It shows which details were supplied, provides transparent calculations, retrieves relevant educational notes, and supports optional follow-up conversation. It does not tell a person to buy or not buy.
+A neutral, local-first purchase reflection app. It shows which details were supplied, provides transparent calculations, retrieves relevant educational notes, and supports optional follow-up conversation. The chat can show a provisional BUY / WAIT / DON'T BUY decision signal, but this heuristic is not a directive, financial advice, or a validated prediction.
 
 ## Architecture
 
 - **Frontend:** React + TypeScript + Vite (`frontend/src/main.tsx` imports `frontend/src/App.tsx` explicitly)
 - **Backend:** FastAPI + Pydantic (`backend/main.py`)
-- **Assessment:** transparent deterministic heuristic and calculations (`backend/assessment.py`)
+- **Assessment:** transparent deterministic heuristic, calculations, and shared BUY / WAIT / DON'T BUY decision rules (`backend/assessment.py`)
+- **Conversation assessment:** rule-based extraction with per-session facts, evidence metadata, deterministic scores, and a provisional BUY / WAIT / DON'T BUY decision signal (`backend/main.py`)
+- **Regression scenarios:** small, synthetic baseline set used only for extraction and decision-invariant tests (`backend/data/purchase_scenarios.jsonl`)
+- **Purchase dataset:** reproducible synthetic decision corpus and quality report (`backend/data/purchase_decision_dataset.jsonl`, `backend/data/purchase_decision_dataset_quality.json`)
+- **Semantic retrieval:** offline hashed word/bigram index with version checks and deterministic evaluation (`backend/retrieval.py`, `backend/data/purchase_decision_index.json`)
 - **Knowledge retrieval:** normalized, weighted local Markdown notes (`backend/knowledge.py`, `data/common/`)
 - **PDF:** generated server-side by ReportLab at `POST /api/report/pdf`
 - **Optional LLM:** installed local Ollama models are discovered at runtime; deterministic fallback remains available
@@ -74,7 +78,7 @@ Restart the backend after changing the environment. Model choices are validated 
 
 The chat accepts up to 2,000 characters per message, retains a bounded in-memory turn history for follow-ups, supports Enter to send and Shift+Enter for a new line, and can start a separate conversation without clearing the assessment. While a reply is being generated, an accessible animated thinking indicator is shown. Local model replies are not streamed; the indicator remains visible until the response or timeout returns.
 
-When no usable model response is available, deterministic chat recognizes purchase intent and asks at most one primary follow-up at a time. It tracks supported facts, corrections, unresolved conflicts, motivations, usage, and current-item condition in temporary per-session memory. The API updates deterministic purchase-pressure and regret-risk scores after each message, returns a provisional decision signal plus supporting/countervailing facts and missing inputs, and calculates cost per use only when price, usage, and lifespan are known. A decision signal is not a directive or validated prediction; unsupported or conflicting information remains unknown. This bounded fallback is not an unrestricted language model.
+When no usable model response is available, deterministic chat recognizes purchase intent and asks at most one primary follow-up at a time. It tracks supported facts, corrections, unresolved conflicts, motivations, usage, current-item condition, and per-fact evidence metadata in temporary per-session memory. The optional LLM drafts conversation wording only; deterministic extraction remains the source of assessed facts and the canonical recommendation. Financial statements such as “I have enough savings” or “I can afford it” are retained as user-reported claims, separately from budget and product price, and are not treated as a full affordability finding. Replacement urgency is tracked separately from whether a specific model has been evaluated. Per-session requests are serialized to prevent interleaved updates. The API calculates separate purchase-pressure and regret-risk reflections, lists unknown inputs, and returns a provisional BUY / WAIT / DON'T BUY decision signal. The decision signal and scores are heuristics, not validated predictions or financial advice; unsupported or conflicting information remains unknown. This bounded fallback is not an unrestricted language model.
 
 ## Dashboard and journal
 
@@ -89,7 +93,11 @@ The primary navigation scrolls to Overview, assessment, chat, product tracking, 
 - A budget comparison uses only the budget and recurring cost explicitly entered. A monthly-surplus comparison shows price divided by that stated figure; it is not independently verified and does not establish affordability.
 - Sentiment is a small keyword signal with explicit evidence and low/moderate confidence; it is not a psychological assessment.
 - The 0–100 regret-risk value is an explainable design heuristic. Its factors are shown, and it is not scientifically validated or a prediction of actual regret.
-- Chat recalculates its deterministic reflection scores and missing-input list after each message. Correction language such as “actually” updates supported facts; conflicting figures are withheld from assessment until clarified. Provisional scores do not imply that missing item price or financial information is known.
+- Both the guided assessment and conversation use the same deterministic recommendation rules. They return BUY, WAIT, or DON'T BUY and mark the result provisional while relevant information is missing. The existing text reflection remains available separately from that decision signal.
+- The displayed confidence label describes completeness of decision-relevant facts only; it is not a probability, validated confidence interval, or prediction.
+- Purchase pressure measures explicit timing and social/emotional pressure; missing information is reported separately and does not itself count as pressure. Regret-risk points consider stated current-item condition, discretionary purpose, pressure, unchecked alternatives or repair, and a known budget overrun.
+- Chat recalculates its deterministic reflection scores and missing-input list after each message. Correction language such as “actually” updates supported facts; conflicting figures are withheld from assessment until clarified. Extracted facts expose their source, confidence, and timestamp. Provisional scores do not imply that missing item price or financial information is known.
+- `backend/data/purchase_scenarios.jsonl` contains eight project-authored synthetic scenarios, including optional-upgrade and time-sensitive replacement cases. It is labelled synthetic and CC0-1.0; it is not customer data, empirical purchase-outcome evidence, or training data. The scenarios check fact extraction and decision invariants, not fixed verdicts or scientific calibration. No external dataset is used.
 - Retrieved note text is reference content, not executable instructions. Sources are linked in the UI and included in the PDF.
 
 ## PDF export
@@ -112,6 +120,12 @@ The endpoint returns `application/pdf` as `beforeyoubuy-review.pdf`. The documen
 source .venv/bin/activate
 pytest -q
 
+# Rebuild and validate the local purchase corpus and retrieval index
+python scripts/generate_purchase_dataset.py
+python scripts/validate_purchase_dataset.py
+python scripts/build_purchase_index.py
+python scripts/evaluate_purchase_retrieval.py
+
 # Frontend type check and production build
 cd frontend
 npm run build
@@ -127,6 +141,8 @@ python scripts/summarize_evaluations.py
 Pytest sets `BEFOREYOUBUY_DB_PATH` to a disposable temporary SQLite database before application modules are imported and removes that directory at the end of the test session. Tests do not use or delete the local application database.
 
 `sentiment_labels.csv` contains a small manually labeled sample; its metrics describe only that sample and the deterministic lexicon. `response_evaluation.csv` contains five fallback replies from the demo that were manually scored against the stated safety/relevance criteria; it is not an LLM evaluation. Live Ollama probes were attempted, but their reasoning-style output was rejected, so no successful model-response evaluation is claimed. Historical experiment files and metrics from other versions were not present in this rebuild.
+
+The purchase corpus contains 2,048 reproducibly generated synthetic records across 16 categories. It is a retrieval/evaluation fixture, not customer data or empirical evidence. The index uses a local 256-dimensional hashed word/bigram representation; retrieval is optional and cannot override explicit conversation facts. The held-out retrieval report compares it with lexical overlap, but its relevance labels are generated consistency labels rather than human judgments.
 
 The regret-risk weights are source-configured in `backend/assessment.py` and are listed in the result assumptions. They are reflection prompts, not a scientifically validated score. The point-based assessment also produces non-directive comparison text; no score is a purchase instruction.
 

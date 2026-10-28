@@ -1,14 +1,41 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from main import AssessmentInput, evaluate
+from main import AssessmentInput, ScoringContext, evaluate, recommend_purchase
 import pytest
 
 
 def test_budget_overrun_flags_review():
     result = evaluate(AssessmentInput(name="Headphones", price=20000, budget=15000, recurring_monthly=500))
     assert result.recommendation == "Review the entered budget figures"
+    assert result.decision == "DON'T BUY"
     assert result.budget_exceeded_by == 11000
+
+
+def test_recommendation_rules_distinguish_necessary_replacement_and_optional_upgrade():
+    replacement = evaluate(AssessmentInput(
+        name="Headphones",
+        price=8000,
+        budget=10000,
+        need="Essential need",
+        current="Mine is broken or unusable",
+        urgency="A genuine deadline",
+        deadline_consequences=True,
+        alternative_available=False,
+        alternatives_checked=True,
+    ))
+    upgrade = evaluate(AssessmentInput(
+        name="Headphones",
+        price=18000,
+        need="Useful improvement",
+        current="I have something that works",
+        urgency="Social pressure or FOMO",
+    ))
+
+    assert replacement.decision == "BUY"
+    assert replacement.provisional is True
+    assert upgrade.decision == "WAIT"
+    assert upgrade.provisional is True
 
 
 def test_zero_recurring_cost_and_valid_cost_per_use():
@@ -49,6 +76,38 @@ def test_zero_usage_or_lifespan_is_rejected():
 def test_omitted_currency_is_reported_as_a_default():
     result = evaluate(AssessmentInput(name="Item", price=10))
     assert result.defaults_applied == ["currency"]
+
+
+def test_user_reported_savings_are_not_a_budget_or_verified_affordability():
+    result = evaluate(AssessmentInput(
+        name="Headphones",
+        price=18000,
+        savings_adequacy="reported_sufficient",
+    ))
+
+    assert result.affordability["budget_provided"] is False
+    assert result.affordability["user_affordability"] is None
+    assert result.affordability["savings_adequacy"] == "reported_sufficient"
+    assert any("self-reported" in item.lower() for item in result.missing_inputs)
+    assert result.decision == "WAIT"
+
+
+def test_urgent_replacement_with_no_selected_model_is_not_model_approval():
+    context = ScoringContext(
+        name="Headphones",
+        need="Solves a real problem",
+        current="Mine is broken or unusable",
+        urgency="A genuine deadline",
+        deadline_consequences=True,
+        alternative_available=False,
+        purchase_timing="urgent",
+        user_affordability="reported_affordable",
+    )
+
+    decision, explanation = recommend_purchase(context)
+    assert decision == "WAIT"
+    assert "time-sensitive" in explanation
+    assert "no specific model or price" in explanation
 
 
 def test_five_uses_weekly_for_two_years_calculates_520_uses():

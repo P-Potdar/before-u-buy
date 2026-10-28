@@ -1,0 +1,24 @@
+{
+  "dataset_records": 2048,
+  "train_records": 960,
+  "held_out_records": 1088,
+  "evaluated_query_count": 272,
+  "split": "stable product-name parity; one product per category held out",
+  "relevance": "same product category and matching need class or product condition",
+  "metrics": {
+    "semantic": {
+      "recall_at_5": 0.09926470588235294,
+      "precision_at_5": 0.019852941176470598,
+      "mrr_at_5": 0.028247549019607847
+    },
+    "lexical": {
+      "recall_at_5": 0.08823529411764706,
+      "precision_at_5": 0.01764705882352942,
+      "mrr_at_5": 0.020220588235294122
+    }
+  },
+  "limitations": [
+    "Synthetic relevance labels are consistency labels, not human judgments.",
+    "The held-out products remain in familiar categories; this is not an unseen-category test."
+  ]
+}

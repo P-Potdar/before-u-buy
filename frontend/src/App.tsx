@@ -12,6 +12,10 @@ type Assessment = {
   currency: string;
   price: number;
   recommendation: string;
+  decision: 'BUY' | 'WAIT' | "DON'T BUY";
+  decision_explanation: string;
+  provisional: boolean;
+  confidence: { level: string; basis: string };
   summary: string;
   factors: string[];
   factor_weights: number[];
@@ -68,19 +72,54 @@ type DecisionScore = {
   limitations: string;
   factors: { factor: string; points: number }[];
 };
+type ChatFinancialContext = {
+  product_price: number | null;
+  stated_budget: number | null;
+  currency: string | null;
+  user_affordability: 'reported_affordable' | 'reported_not_affordable' | null;
+  savings_adequacy: 'reported_sufficient' | 'reported_insufficient' | null;
+  essential_expenses_affected: boolean | null;
+  savings_affected: boolean | null;
+  upcoming_expenses: boolean | null;
+};
+type ChatReplacementContext = {
+  purchase_timing: 'urgent' | 'not_urgent' | null;
+  waiting_period: string | null;
+  deadline_consequences: boolean | null;
+  usable_alternative_available: boolean | null;
+};
 type ChatDecisionState = {
   signal: string;
   signal_explanation: string;
+  recommendation: 'BUY' | 'WAIT' | "DON'T BUY";
+  recommendation_explanation: string;
+  confidence: { level: string; basis: string };
   provisional: boolean;
   purchase_pressure: DecisionScore;
   regret_risk: DecisionScore;
   estimated_total_uses: number | null;
   estimated_cost_per_use: number | null;
   budget_exceeded_by: number | null;
+  financial_context: ChatFinancialContext;
+  replacement_context: ChatReplacementContext;
   supporting_factors: string[];
   factors_to_consider: string[];
   missing_inputs: string[];
+  changed_facts: { field: string; previous: unknown; current: unknown }[];
   limitations: string;
+};
+type ChatApiResponse = {
+  reply: string;
+  session_id: string;
+  processing_ms: number;
+  provider: string;
+  model: string | null;
+  fallback_reason: string | null;
+  tools_used: string[];
+  knowledge_sources: Source[];
+  assessment_update: Assessment | null;
+  session_facts: Record<string, unknown>;
+  decision_state: ChatDecisionState;
 };
 type ModelCatalog = {
   provider: string;
@@ -122,6 +161,76 @@ async function readError(response: Response): Promise<string> {
   return `Request failed with status ${response.status}.`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+
+function assertChatApiResponse(value: unknown): asserts value is ChatApiResponse {
+  if (
+    !isRecord(value)
+    || typeof value.reply !== 'string'
+    || typeof value.session_id !== 'string'
+    || typeof value.processing_ms !== 'number'
+    || typeof value.provider !== 'string'
+    || (value.model !== null && typeof value.model !== 'string')
+    || (value.fallback_reason !== null && typeof value.fallback_reason !== 'string')
+    || !isStringArray(value.tools_used)
+    || !Array.isArray(value.knowledge_sources)
+    || !isRecord(value.session_facts)
+    || (value.assessment_update !== null && !isRecord(value.assessment_update))
+  ) {
+    throw new Error('The chat response was missing required conversation data.');
+  }
+  const state = value.decision_state;
+  const financial = isRecord(state) ? state.financial_context : null;
+  const replacement = isRecord(state) ? state.replacement_context : null;
+  const nullableNumber = (item: unknown) => item === null || typeof item === 'number';
+  const nullableBoolean = (item: unknown) => item === null || typeof item === 'boolean';
+  const nullableEnum = (item: unknown, allowed: string[]) => item === null || allowed.includes(String(item));
+  if (
+    !isRecord(state)
+    || !['BUY', 'WAIT', "DON'T BUY"].includes(String(state.recommendation))
+    || typeof state.recommendation_explanation !== 'string'
+    || typeof state.provisional !== 'boolean'
+    || !isRecord(state.confidence)
+    || typeof state.confidence.level !== 'string'
+    || typeof state.confidence.basis !== 'string'
+    || !isRecord(financial)
+    || !nullableNumber(financial.product_price)
+    || !nullableNumber(financial.stated_budget)
+    || (financial.currency !== null && !['INR', 'USD', 'GBP', 'EUR'].includes(String(financial.currency)))
+    || !nullableEnum(financial.user_affordability, ['reported_affordable', 'reported_not_affordable'])
+    || !nullableEnum(financial.savings_adequacy, ['reported_sufficient', 'reported_insufficient'])
+    || !nullableBoolean(financial.essential_expenses_affected)
+    || !nullableBoolean(financial.savings_affected)
+    || !isRecord(replacement)
+    || !nullableEnum(replacement.purchase_timing, ['urgent', 'not_urgent'])
+    || (replacement.waiting_period !== null && typeof replacement.waiting_period !== 'string')
+    || !nullableBoolean(replacement.deadline_consequences)
+    || !nullableBoolean(replacement.usable_alternative_available)
+    || !isStringArray(state.missing_inputs)
+    || !Array.isArray(state.changed_facts)
+    || !state.changed_facts.every(item => isRecord(item) && typeof item.field === 'string')
+  ) {
+    throw new Error('The chat response did not include a valid canonical recommendation.');
+  }
+  for (const key of ['purchase_pressure', 'regret_risk']) {
+    const score = state[key];
+    if (
+      !isRecord(score)
+      || typeof score.score !== 'number'
+      || !Array.isArray(score.factors)
+      || !score.factors.every(item => isRecord(item) && typeof item.factor === 'string' && typeof item.points === 'number')
+    ) {
+      throw new Error('The chat response did not include valid decision scores.');
+    }
+  }
+}
+
 function App() {
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
@@ -157,6 +266,8 @@ function App() {
   const [chatDecision, setChatDecision] = useState<ChatDecisionState | null>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const chatBusyRef = useRef(false);
+  const decisionGeneration = useRef(0);
+  const assessmentGeneration = useRef(0);
   const [assessmentContext, setAssessmentContext] = useState<Record<string, string | number> | null>(null);
   const [assessmentContextPending, setAssessmentContextPending] = useState(false);
   const [activeSection, setActiveSection] = useState('overview');
@@ -277,6 +388,7 @@ function App() {
   }
 
   function newConversation() {
+    decisionGeneration.current += 1;
     setChatTurns([]);
     setSessionId(crypto.randomUUID());
     setChatTiming(null);
@@ -301,6 +413,8 @@ function App() {
 
   async function runAssessment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const requestGeneration = ++decisionGeneration.current;
+    const assessmentRequest = ++assessmentGeneration.current;
     setBusy(true);
     setError('');
     try {
@@ -311,15 +425,18 @@ function App() {
       });
       if (!response.ok) throw new Error(await readError(response));
       const assessment = await response.json() as Assessment;
+      if (requestGeneration !== decisionGeneration.current) return;
       setResult(assessment);
       setAssessmentContext(payload);
       setAssessmentContextPending(true);
       setSessionId(crypto.randomUUID());
       setChatTurns([{ role: 'assistant', text: assessment.summary }]);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Assessment could not be completed.');
+      if (requestGeneration === decisionGeneration.current) {
+        setError(cause instanceof Error ? cause.message : 'Assessment could not be completed.');
+      }
     } finally {
-      setBusy(false);
+      if (assessmentRequest === assessmentGeneration.current) setBusy(false);
     }
   }
 
@@ -487,6 +604,8 @@ function App() {
 
   async function sendChatMessage(message: string) {
     if (chatBusyRef.current) return;
+    const requestGeneration = ++decisionGeneration.current;
+    const requestSessionId = sessionId;
     chatBusyRef.current = true;
     setChatBusy(true);
     setError('');
@@ -496,25 +615,15 @@ function App() {
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({
           message,
-          session_id: sessionId,
+          session_id: requestSessionId,
           ...(selectedModel ? { model: selectedModel } : {}),
           ...(assessmentContext && assessmentContextPending ? { assessment_context: assessmentContext } : {}),
         }),
       });
       if (!response.ok) throw new Error(await readError(response));
-      const data = await response.json() as {
-        reply: string;
-        session_id: string;
-        processing_ms: number;
-        provider: string;
-        model: string | null;
-        fallback_reason: string | null;
-        tools_used: string[];
-        knowledge_sources: Source[];
-        assessment_update: Assessment | null;
-        session_facts: Record<string, unknown>;
-        decision_state: ChatDecisionState;
-      };
+      const data: unknown = await response.json();
+      assertChatApiResponse(data);
+      if (requestGeneration !== decisionGeneration.current) return;
       setSessionId(data.session_id);
       setAssessmentContextPending(false);
       setChatTiming(data.processing_ms);
@@ -529,8 +638,10 @@ function App() {
       if (data.assessment_update) setResult(data.assessment_update);
       setChatTurns(previous => [...previous, { role: 'assistant', text: data.reply }]);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The conversation reply failed.');
-      setRetryMessage(message);
+      if (requestGeneration === decisionGeneration.current) {
+        setError(cause instanceof Error ? cause.message : 'The conversation reply failed.');
+        setRetryMessage(message);
+      }
     } finally {
       chatBusyRef.current = false;
       setChatBusy(false);
@@ -667,7 +778,7 @@ function App() {
       {result && (
         <section className="results" aria-live="polite">
           <div className="result-heading">
-            <div><p className="eyebrow">YOUR REFLECTION</p><h2>{result.name}</h2><p className="result-summary">{result.summary}</p></div>
+            <div><p className="eyebrow">YOUR REFLECTION</p><h2>{result.name}</h2><p className="result-summary"><b>{result.decision}{result.provisional ? ' · Provisional' : ''}.</b> {result.decision_explanation}</p><p className="small">Evidence completeness: {result.confidence.level}. {result.confidence.basis}</p><p>{result.summary}</p></div>
             <button className="button button-secondary" type="button" onClick={downloadPdf} disabled={busy}>{busy ? 'Preparing…' : 'Download PDF review'}</button>
           </div>
 
@@ -771,10 +882,76 @@ function App() {
         {chatDecision && (
           <section className="chat-decision" aria-live="polite" aria-label="Updated purchase reflection">
             <div className="chat-decision-heading">
-              <div><p className="eyebrow">UPDATED FROM THIS CONVERSATION</p><h3>{chatDecision.signal}</h3></div>
+              <div><p className="eyebrow">UPDATED FROM THIS CONVERSATION</p><h3>{chatDecision.recommendation}</h3></div>
               {chatDecision.provisional && <span className="provisional-label">Provisional</span>}
             </div>
-            <p>{chatDecision.signal_explanation}</p>
+            <p>{chatDecision.recommendation_explanation}</p>
+            <p className="small"><b>Evidence completeness: {chatDecision.confidence.level}.</b> {chatDecision.confidence.basis}</p>
+            {(chatDecision.financial_context.product_price !== null
+              || chatDecision.financial_context.stated_budget !== null
+              || chatDecision.financial_context.user_affordability !== null
+              || chatDecision.financial_context.savings_adequacy !== null
+              || chatDecision.financial_context.essential_expenses_affected !== null
+              || chatDecision.financial_context.savings_affected !== null
+              || chatDecision.financial_context.upcoming_expenses !== null) && (
+              <p className="small"><b>Financial details stated:</b> {[
+                chatDecision.financial_context.product_price !== null
+                  ? `Product price: ${currency(chatDecision.financial_context.product_price, chatDecision.financial_context.currency ?? 'INR')}`
+                  : null,
+                chatDecision.financial_context.stated_budget !== null
+                  ? `Budget: ${currency(chatDecision.financial_context.stated_budget, chatDecision.financial_context.currency ?? 'INR')}`
+                  : null,
+                chatDecision.financial_context.user_affordability === 'reported_affordable'
+                  ? 'You report that it is affordable'
+                  : chatDecision.financial_context.user_affordability === 'reported_not_affordable'
+                    ? 'You report that it is not affordable'
+                    : null,
+                chatDecision.financial_context.savings_adequacy === 'reported_sufficient'
+                  ? 'You report sufficient savings'
+                  : chatDecision.financial_context.savings_adequacy === 'reported_insufficient'
+                    ? 'You report insufficient savings'
+                    : null,
+                chatDecision.financial_context.essential_expenses_affected === false
+                  ? 'You report no effect on rent or bills'
+                  : chatDecision.financial_context.essential_expenses_affected === true
+                    ? 'You report an effect on rent or bills'
+                    : null,
+                chatDecision.financial_context.savings_affected === false
+                  ? 'You report no effect on savings'
+                  : chatDecision.financial_context.savings_affected === true
+                    ? 'You report an effect on savings'
+                    : null,
+                chatDecision.financial_context.upcoming_expenses === true
+                  ? 'You report upcoming expenses'
+                  : null,
+              ].filter((item): item is string => item !== null).join(' · ')}
+                {chatDecision.financial_context.stated_budget !== null && chatDecision.financial_context.product_price === null
+                  ? ' A budget is not the price of a specific product.'
+                  : ''}
+              </p>
+            )}
+            {(chatDecision.replacement_context.purchase_timing !== null
+              || chatDecision.replacement_context.waiting_period !== null
+              || chatDecision.replacement_context.usable_alternative_available !== null) && (
+              <p className="small"><b>Timing and alternatives:</b> {[
+                chatDecision.replacement_context.purchase_timing === 'urgent'
+                  ? 'You described a time-sensitive replacement need'
+                  : chatDecision.replacement_context.purchase_timing === 'not_urgent'
+                    ? 'You said the purchase is not urgent'
+                    : null,
+                chatDecision.replacement_context.waiting_period
+                  ? `You can wait ${chatDecision.replacement_context.waiting_period}`
+                  : null,
+                chatDecision.replacement_context.usable_alternative_available === false
+                  ? 'No usable alternative was reported'
+                  : chatDecision.replacement_context.usable_alternative_available === true
+                    ? 'A usable alternative was reported'
+                    : null,
+              ].filter((item): item is string => item !== null).join(' · ')}</p>
+            )}
+            {chatDecision.changed_facts.length > 0 && (
+              <p className="small"><b>Changed this turn:</b> {chatDecision.changed_facts.map(change => `${change.field.split('_').join(' ')}${change.previous === undefined ? '' : ` (${String(change.previous)} →)`}: ${String(change.current)}`).join(' · ')}</p>
+            )}
             <div className="chat-score-row">
               <span>Purchase pressure <b>{chatDecision.purchase_pressure.score}/100</b></span>
               <span>Regret-risk reflection <b>{chatDecision.regret_risk.score}/100</b></span>
@@ -814,7 +991,7 @@ function App() {
         </p>
           {chatFallbackReason && <p className="small chat-fallback-note" role="status">{chatFallbackReason} A deterministic response was used instead.</p>}
         {followupSources.length > 0 && <div className="chat-sources"><b>Sources for this reply:</b> {followupSources.map((source, index) => <span key={`${source.url}-${index}`}>{index > 0 && ' · '}<a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></span>)}</div>}
-        {Object.keys(sessionFacts).length > 0 && <p className="small">Facts recognized from your messages: {Object.entries(sessionFacts).map(([key, value]) => `${key.split('_').join(' ')}: ${String(value)}`).join(' · ')}</p>}
+        {Object.entries(sessionFacts).some(([key]) => key !== 'fact_evidence') && <p className="small">Facts recognized from your messages: {Object.entries(sessionFacts).filter(([key]) => key !== 'fact_evidence').map(([key, value]) => `${key.split('_').join(' ')}: ${String(value)}`).join(' · ')}</p>}
         <p className="small chat-privacy">Conversation context is temporary and held in backend memory; it clears on restart or when you start a new conversation.</p>
       </section>
 

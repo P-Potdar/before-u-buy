@@ -305,3 +305,93 @@ At 390 × 844 and 1440 × 900, page width matched viewport width; no browser pag
 ### Delivery limitation
 
 - The project directory is not an independent Git worktree. It is untracked under the parent `/Users/prabhatparikshitpotdar` repository, whose configured remote is `https://github.com/P-Potdar/java-code.git` and whose branch is `main`. No files were staged, committed, or pushed to avoid delivering this project to an unrelated remote or disturbing the parent repository.
+
+## 2026-10-28 evidence-sensitive recommendation update
+
+### Baseline reproduction and confirmed cause
+
+Six independent fallback sessions were run before editing. The extraction rules missed ordinary phrases including “works adequately,” a practical need beginning tomorrow, and “usable” current items; they also did not retain unchecked-alternative facts. Missing urgency or purpose was converted into the same default pressure points, and the chat decision branch therefore produced repeated `INSUFFICIENT INFORMATION` states for materially different situations.
+
+| Scenario | Baseline regret / pressure | Baseline signal | Observed extraction gap |
+|---|---:|---|---|
+| A — optional upgrade | 25 / 45 | `WAIT` | Functional condition and need were missing; “work adequately” was also read as work use. |
+| B — essential replacement | 0 / 15 | `INSUFFICIENT INFORMATION` | Broken item was detected, but need, tomorrow deadline, and no usable alternative were not. |
+| C — affordability unknown | 0 / 15 | `INSUFFICIENT INFORMATION` | Working condition and explicit affordability uncertainty were missing. |
+| D — potential repair | 0 / 15 | `INSUFFICIENT INFORMATION` | Limited-but-working condition and repair uncertainty were incomplete. |
+| E — ergonomic chair | 0 / 15 | `INSUFFICIENT INFORMATION` | Product was recognized, but usable current item and unchecked alternatives were not retained. |
+| F — minimal information | 0 / 15 | `INSUFFICIENT INFORMATION` | The item and price were recognized; all other facts were correctly unknown. |
+
+### Changes delivered
+
+- Improved deterministic extraction for functional/limited/broken current items, practical needs, genuine deadlines, substitute availability, affordability uncertainty, alternatives, repair checks, usage, and additional product categories. Narrowed use-case matching to avoid treating “works adequately” as “for work.”
+- Added explicit fact evidence metadata (source, confidence, timestamp, and supporting user text) and current-turn fact changes. Unknown affordability remains unknown.
+- Reworked purchase-pressure scoring so omitted facts do not inflate pressure. Pressure now reflects actual practical deadlines, social/sale pressure, emotional context, and absence of a usable alternative. Regret-risk additionally reflects working alternatives, unreviewed alternatives, and uninvestigated repair for a limited item.
+- Centralized recommendation rules for both `/api/assess` and `/api/chat`. Both expose canonical `BUY`, `WAIT`, or `DON'T BUY`; the UI shows the shared result, provisional status, evidence-completeness level, and the reason. The legacy descriptive assessment recommendation remains available separately.
+- Serialized same-session chat requests and guarded frontend decision state against stale asynchronous responses.
+- Added `backend/data/purchase_scenarios.jsonl`, six project-authored synthetic baseline cases. The regression test checks 34 expected facts, 13 explicit unknowns, five relative score directions, a single follow-up question, and agreement between chat and assessment recommendations. These checks are software regression assertions, not model accuracy or real-world outcome metrics.
+
+### After-fix baseline comparison
+
+| Scenario | Extracted evidence retained | Regret / pressure | Recommendation | Confidence / status |
+|---|---|---:|---|---|
+| A — optional upgrade | Working alternative, useful improvement, social pressure | 40 / 25 | `WAIT` | Low; provisional |
+| B — essential replacement | Broken item, practical need, real deadline, no existing usable alternative | 0 / 25 | `WAIT` | Low; provisional; price/model alternatives and affordability remain unresolved |
+| C — affordability unknown | Working alternative, explicit unknown affordability, cheaper alternatives unchecked | 25 / 0 | `WAIT` | Low; provisional |
+| D — potential repair | Working with limitations, repair not checked, no deadline | 25 / 0 | `WAIT` | Low; provisional |
+| E — different product | Ergonomic chair, usable current chair, comfort improvement, alternatives unchecked | 25 / 0 | `WAIT` | Low; provisional |
+| F — minimal information | Headphones and INR 18,000 only; purpose/current item/finances remain unknown | 0 / 0 | `WAIT` | Low; provisional |
+
+The replacement scenario does not receive an automatic BUY: the specific product and price remain unverified against alternatives and user-provided financial context. That is a deliberate provisional result, not a claim that the user should delay an essential replacement. The confidence label describes evidence completeness only and is not a probability.
+
+### Dataset provenance and validation
+
+- **Dataset:** `backend/data/purchase_scenarios.jsonl`, JSONL records with scenario id/category/message, expected facts and unknowns, factor-direction assertions, follow-up/invariant notes, provenance, license, and limitations.
+- **Provenance/license:** project-authored synthetic scenarios, labelled synthetic and CC0-1.0; no external dataset or customer data is included.
+- **Limitations:** six cases support baseline regression coverage only. No human outcome labels, score calibration, model training, external research, or scientific validation is claimed.
+
+### Final verification
+
+- **PASS** `.venv/bin/python -m pytest -q` — **127 passed**, 1 existing Starlette/httpx deprecation warning. The suite includes backend unit tests, API integration, six synthetic scenario checks, correction/session-isolation tests, and concurrent same-session updates; tests use disposable SQLite storage.
+- **PASS** `cd frontend && PATH=/Users/prabhatparikshitpotdar/.nvm/versions/node/v20.11.1/bin:$PATH npm run build` — TypeScript check and Vite 6.4.5 production build succeeded.
+- **PASS** `.venv/bin/python scripts/check_secrets.py` and `git diff --check`.
+- **NOT RUN** Live Ollama inference. Regression coverage uses deterministic fallback and mocked model behavior; no live-model quality claim is made.
+- **NOT RUN** Browser UI automation. The production build and API tests do not verify visual rendering or browser response ordering.
+- No dependencies were added, and no files were staged, committed, or pushed.
+
+## 2026-10-28 comprehensive financial and urgency extraction follow-up
+
+### Diagnosis before this phase
+
+The two provided messages were run through independent `POST /api/chat` sessions with the deterministic provider, before edits in this phase.
+
+- **A:** item/price, working item, general improvement, social influence, and unchecked alternatives were present. The parser did not preserve “improved sound quality,” “enough money saved,” or “comfortably wait another month”; “not urgent” also did not have a separate normalized representation. `decision_state.missing_inputs` incorrectly stated that affordability was unknown.
+- **B:** the parser retained `budget=18000`, broken condition, and practical need. It did not preserve the deadline “starting tomorrow,” “no spare ... or other usable alternative,” or “can afford ... without affecting rent, bills, or savings.” No product price was stated, so `price` correctly remained unknown. Its unknown list therefore incorrectly claimed timing and alternative availability were unprovided, while the decision path treated a budget as no financial evidence.
+- The existing model route (`_ollama_reply`) drafts only a reply; it is not a structured fact extractor. The deterministic `_extract_session_facts` output is the source for assessment facts. No live model response or raw model output is stored in this session, so no unverified model output is represented as observed evidence.
+- The API does return a canonical recommendation at `decision_state.recommendation`; `assessment_update` is absent when a product price is unknown. The chat UI uses that decision-state field, but its unchecked TypeScript cast means a malformed response could fail rendering rather than report a response-contract error.
+
+### Changes made
+
+- Added independent, evidence-backed fields for user-reported affordability, savings adequacy, effects on rent/bills and savings, purchase timing, waiting period, and external pressure. These are merged through the existing correction/conflict mechanism and never populate budget or product price.
+- Expanded deterministic extraction for the exact phrases in A/B, including “enough money saved,” “can afford ... without affecting rent, bills, or savings,” “not urgent,” “comfortably wait another month,” “starting tomorrow,” and “no spare headphones or other usable alternative.”
+- Kept a stated budget distinct from product price. The API now always returns canonical recommendation, financial context, and replacement context even when no product price is available.
+- Refined the shared recommendation rule: A's optional upgrade remains WAIT with explicit rationale referencing the working pair and stated one-month wait. B remains WAIT for a specific model/price, while the explanation calls for identifying a suitable replacement promptly. A mixed social-pressure + practical-deadline case preserves both facts without creating a conflict.
+- Added runtime validation for the API's canonical chat recommendation and supporting evidence before the frontend renders it. The chat card now renders user-reported finance and urgency details, and explicitly labels a budget as not being a product price when no product price was stated.
+- Extended `backend/data/purchase_scenarios.jsonl` from six to eight synthetic cases, adding the two supplied examples; updated the README accordingly.
+
+### Exact input results after changes
+
+Both messages were rerun as independent `POST /api/chat` requests with `LLM_PROVIDER=none`. Both returned HTTP 200, canonical `signal == recommendation`, and a provisional result.
+
+| Case | Canonical result | Extracted evidence and remaining unknowns |
+|---|---|---|
+| **A — optional upgrade** | **WAIT** — the current pair works, the user says they can wait one month, and the rationale calls for comparing the improvement and alternatives rather than buying due to social influence alone. | Product price INR 18,000; no budget amount invented; user reports sufficient savings, not full affordability; social influence; `purchase_timing=not_urgent`; `waiting_period=one month`; alternatives unchecked. Missing: numeric budget comparison, use frequency/lifespan, suitable alternatives. Scores: pressure 25, regret-risk reflection 50. |
+| **B — urgent replacement** | **WAIT for a specific model** — the need is time-sensitive, so identify a suitable option promptly; no specific model or price was provided to assess. | Budget INR 18,000 remains separate from missing product price; user-reported affordable and no stated rent/bill/savings impact; broken current item; meetings starting tomorrow; no usable alternative; models/options unchecked. Missing: product price, suitable alternatives, usage/lifespan. Scores: pressure 25, regret-risk reflection 10. |
+
+### Verification
+
+- **PASS** Complete suite: `.venv/bin/pytest -q` — **134 passed**, one existing Starlette/httpx deprecation warning.
+- **PASS** Frontend: `cd frontend && PATH=/Users/prabhatparikshitpotdar/.nvm/versions/node/v20.11.1/bin:$PATH npm run build` — TypeScript and Vite production build passed.
+- **PASS** `.venv/bin/python scripts/check_secrets.py`.
+- **PASS** `git diff --check`.
+- **PASS** Integrated browser check of the urgent-replacement UI: the canonical WAIT explanation, stated budget, user-reported affordability/impact, missing product price, urgency, and alternative status rendered correctly. A local `qwen3:4b` model was detected, but the reply path produced no usable model answer after approximately 62.7 seconds; the deterministic fallback rendered successfully. No successful live Ollama inference is claimed. Browser automation was limited to this flow; no broader visual/device matrix was run.
+- No dependencies were added. No files were staged, committed, or pushed.

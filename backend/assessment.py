@@ -1,9 +1,8 @@
-"""Validated, transparent purchase-reflection calculations.
+"""Validated, transparent purchase-reflection calculations and decision rules.
 
-Heuristic point rules are design choices, not a validated model or a
-prediction. Result text describes factors and comparisons; it does not tell
-the user to buy or not buy. The separate regret-risk weights are centralized
-in ``REGRET_RISK_WEIGHTS`` and shown with their factors in assessment output.
+Heuristic point rules and recommendation rules are design choices, not a
+validated model or a prediction. Regret-risk weights are centralized in
+``REGRET_RISK_WEIGHTS`` and shown with their factors in assessment output.
 """
 
 from __future__ import annotations
@@ -22,6 +21,8 @@ Current = Literal["Mine is broken or unusable", "It works, but has limitations",
 Urgency = Literal["No deadline", "A genuine deadline", "A sale or countdown", "Social pressure or FOMO"]
 Frequency = Literal["Daily", "Several times a week", "Weekly", "Monthly", "A few times a year"]
 Currency = Literal["INR", "USD", "GBP", "EUR"]
+UserAffordability = Literal["reported_affordable", "reported_not_affordable"]
+SavingsAdequacy = Literal["reported_sufficient", "reported_insufficient"]
 
 USES_PER_YEAR: dict[str, int] = {
     "Daily": 365,
@@ -39,7 +40,7 @@ ASSUMPTIONS: list[str] = [
     "When recurring cost is left blank, the total treats it as zero because no recurring amount was provided. That is not a measurement of your subscriptions.",
     "The entered budget is compared with the upfront price plus 12 months of recurring cost. It is not a judgment of overall affordability.",
     "Allocated savings are mentioned only when they are below the upfront price. That note has a weight of zero, so it does not change the point score or the recommendation.",
-    "Regret-risk reflection weights are source-configured: sale/social urgency 25, working alternative 15, mostly discretionary purpose 10, budget overrun 25, and explicit emotional pressure 20. The score is capped at 100.",
+    "Regret-risk reflection weights are source-configured: sale/social urgency 25, working alternative 15, mostly discretionary purpose 10, budget overrun 25, explicit emotional pressure 20, unchecked alternatives 10, and unchecked repair for a limited current item 10. The score is capped at 100.",
     "The same point rules are used for every guided workflow. The workflow name records the question you started with and does not change the score.",
     "The reflective risk indicator is a design heuristic, not a validated prediction of regret.",
 ]
@@ -59,14 +60,16 @@ REGRET_RISK_WEIGHTS = {
     "mostly_want": 10,
     "budget_overrun": 25,
     "explicit_emotional_pressure": 20,
+    "unchecked_alternatives": 10,
+    "unchecked_repair": 10,
 }
 
 PURCHASE_PRESSURE_WEIGHTS = {
     "urgency_or_fomo": 30,
     "social_pressure": 25,
     "emotional_context": 20,
-    "working_alternative": 10,
-    "limited_consideration": 15,
+    "practical_deadline": 10,
+    "no_usable_alternative": 15,
 }
 
 NEED_RULES: dict[str, tuple[int, str]] = {
@@ -144,6 +147,18 @@ class AssessmentInput(BaseModel):
     recurring_monthly: Optional[float] = Field(default=None, ge=0, le=10_000_000)
     monthly_surplus: Optional[float] = Field(default=None, ge=0, le=100_000_000)
     essential_expenses: Optional[float] = Field(default=None, ge=0, le=100_000_000)
+    user_affordability: Optional[UserAffordability] = None
+    savings_adequacy: Optional[SavingsAdequacy] = None
+    essential_expenses_affected: Optional[bool] = None
+    savings_affected: Optional[bool] = None
+    purchase_timing: Optional[Literal["urgent", "not_urgent"]] = None
+    waiting_period: Optional[str] = Field(default=None, max_length=80)
+    external_pressure: Optional[bool] = None
+    alternatives_checked: Optional[bool] = None
+    repair_investigated: Optional[bool] = None
+    alternative_available: Optional[bool] = None
+    deadline_consequences: Optional[bool] = None
+    upcoming_expenses: Optional[bool] = None
 
     @field_validator("name")
     @classmethod
@@ -193,10 +208,23 @@ class ScoringContext(BaseModel):
     scenario: str = ""
     price: float | None = None
     budget: float | None = None
+    monthly_surplus: float | None = None
     recurring_monthly: float | None = None
     need: str | None = None
     current: str | None = None
     urgency: str | None = None
+    alternatives_checked: bool | None = None
+    repair_investigated: bool | None = None
+    alternative_available: bool | None = None
+    deadline_consequences: bool | None = None
+    purchase_timing: str | None = None
+    waiting_period: str | None = None
+    external_pressure: bool | None = None
+    user_affordability: UserAffordability | None = None
+    savings_adequacy: SavingsAdequacy | None = None
+    essential_expenses_affected: bool | None = None
+    savings_affected: bool | None = None
+    upcoming_expenses: bool | None = None
 
 
 class AssessmentOutput(BaseModel):
@@ -204,6 +232,10 @@ class AssessmentOutput(BaseModel):
     currency: str
     price: float
     recommendation: str
+    decision: Literal["BUY", "WAIT", "DON'T BUY"]
+    decision_explanation: str
+    provisional: bool
+    confidence: dict[str, str]
     summary: str
     factors: list[str]
     factor_weights: list[int]
@@ -226,6 +258,124 @@ class AssessmentOutput(BaseModel):
     assumptions: list[str]
     limitations: list[str]
     disclaimer: str = DISCLAIMER
+
+
+def recommend_purchase(
+    data: AssessmentInput | ScoringContext,
+    *,
+    has_conflicts: bool = False,
+) -> tuple[Literal["BUY", "WAIT", "DON'T BUY"], str]:
+    """Return a cautious rule-based recommendation from explicit decision facts."""
+    price = data.price
+    budget = data.budget
+    recurring_total = (data.recurring_monthly or 0) * 12
+    over_budget = (
+        isinstance(price, (int, float))
+        and isinstance(budget, (int, float))
+        and price + recurring_total > budget
+    )
+    affordability_unknown = (
+        budget is None
+        and getattr(data, "monthly_surplus", None) is None
+    )
+    urgent_replacement = (
+        data.need in {"Essential need", "Solves a real problem"}
+        and data.current == "Mine is broken or unusable"
+        and (data.urgency == "A genuine deadline" or getattr(data, "purchase_timing", None) == "urgent")
+        and data.deadline_consequences is True
+        and data.alternative_available is False
+    )
+
+    if has_conflicts:
+        return "WAIT", "Clarify the conflicting details before choosing this specific purchase."
+    if price is None:
+        if urgent_replacement:
+            return "WAIT", "The replacement need is time-sensitive, so identify a suitable option promptly; no specific model or price was provided to assess."
+        return "WAIT", "Clarify the purchase price before deciding whether this specific option fits."
+    if over_budget:
+        return "DON'T BUY", "The supplied total exceeds the budget figure you entered."
+    if (
+        getattr(data, "purchase_timing", None) == "not_urgent"
+        and data.current in {"I have something that works", "It works, but has limitations"}
+    ):
+        waiting_period = getattr(data, "waiting_period", None)
+        wait_detail = f" You said you can wait {waiting_period}." if isinstance(waiting_period, str) else " You said the purchase is not urgent."
+        pressure_detail = " The sale deadline should not determine the decision, especially with upcoming expenses and uncertain affordability." if data.urgency == "A sale or countdown" and getattr(data, "upcoming_expenses", None) is True else ""
+        return "WAIT", "Your current item still works." + wait_detail + pressure_detail + " Compare the specific improvement and suitable alternatives before choosing; external pressure alone does not establish a need to buy now."
+    if urgent_replacement and (data.alternatives_checked is not True or affordability_unknown):
+        return "WAIT", "The replacement need is time-sensitive; compare suitable models and the stated financial details promptly before choosing this specific option."
+    if data.urgency in {"A sale or countdown", "Social pressure or FOMO"}:
+        if getattr(data, "upcoming_expenses", None) is True and affordability_unknown:
+            return "WAIT", "Upcoming expenses and uncertain affordability make it important to separate the sale deadline from the product's practical value before deciding."
+        return "WAIT", "Separate external pressure from the product's practical value before deciding."
+    if (
+        data.need == "Mostly a want"
+        and data.current in {"I have something that works", "It works, but has limitations"}
+    ):
+        return "WAIT", "An optional upgrade with a current alternative has no established need to buy now."
+    if (
+        data.repair_investigated is not True
+        and data.current == "It works, but has limitations"
+    ):
+        return "WAIT", "Check repair feasibility and cost before deciding whether replacement is useful."
+    if (
+        data.alternatives_checked is not True
+        or affordability_unknown
+    ):
+        unresolved = []
+        if data.alternatives_checked is not True:
+            unresolved.append("suitable alternatives")
+        if affordability_unknown:
+            unresolved.append("whether the price fits a budget you choose")
+        return "WAIT", "Check " + " and ".join(unresolved) + " before deciding on this specific product."
+    if (
+        data.need in {"Essential need", "Solves a real problem"}
+        and data.current == "Mine is broken or unusable"
+        and data.urgency == "A genuine deadline"
+        and data.deadline_consequences is True
+        and data.alternative_available is False
+    ):
+        return "BUY", "A stated practical need, real deadline, unusable current item, and no usable alternative are supported by the supplied facts."
+    return "WAIT", "The available facts do not yet establish that this specific purchase is suitable now."
+
+
+def decision_confidence(
+    data: AssessmentInput | ScoringContext,
+    *,
+    has_conflicts: bool = False,
+) -> dict[str, str]:
+    """Describe decision-relevant evidence completeness, not predictive certainty."""
+    unresolved = []
+    if has_conflicts:
+        unresolved.append("conflicting facts")
+    if data.price is None:
+        unresolved.append("purchase price")
+    if data.need is None:
+        unresolved.append("purchase purpose")
+    if data.current is None:
+        unresolved.append("current-item condition")
+    if data.budget is None and getattr(data, "monthly_surplus", None) is None:
+        if getattr(data, "user_affordability", None) is not None or getattr(data, "savings_adequacy", None) is not None:
+            unresolved.append("quantitative financial comparison")
+        else:
+            unresolved.append("financial comparison")
+    if data.alternatives_checked is not True:
+        unresolved.append("alternatives")
+    if data.urgency is None and getattr(data, "purchase_timing", None) is None:
+        unresolved.append("timing")
+    if data.current == "It works, but has limitations" and data.repair_investigated is not True:
+        unresolved.append("repair feasibility")
+    if unresolved:
+        return {
+            "level": "low",
+            "basis": "Decision-relevant information remains unresolved: "
+            + ", ".join(unresolved)
+            + ". This is evidence completeness, not probability or validated confidence.",
+        }
+    return {
+        "level": "moderate",
+        "basis": "The key decision facts were provided; this heuristic is still not scientifically validated or predictive.",
+    }
 
 
 def evaluate(data: AssessmentInput) -> AssessmentOutput:
@@ -301,17 +451,35 @@ def evaluate(data: AssessmentInput) -> AssessmentOutput:
         ),
         "savings_provided": data.savings_allocated is not None,
         "essential_expenses_provided": data.essential_expenses is not None,
-        "note": "Only figures explicitly entered by the user are used; this is not a full affordability assessment.",
+        "user_affordability": data.user_affordability,
+        "savings_adequacy": data.savings_adequacy,
+        "essential_expenses_affected": data.essential_expenses_affected,
+        "savings_affected": data.savings_affected,
+        "upcoming_expenses": data.upcoming_expenses,
+        "note": "Affordability and savings claims are user-reported, not independently verified; this is not a full affordability assessment.",
     }
     missing_inputs = []
     if data.budget is None and data.monthly_surplus is None:
-        missing_inputs.append("A budget or monthly surplus was not provided; no affordability conclusion is available.")
+        if data.user_affordability is None and data.savings_adequacy is None:
+            missing_inputs.append("Affordability is unknown: a budget or monthly surplus was not provided, so no affordability conclusion is available.")
+        else:
+            missing_inputs.append("Only self-reported affordability or savings information is available; no numeric budget comparison was provided.")
     if (data.frequency is None and data.uses_per_week is None) or data.lifespan_years is None:
         missing_inputs.append("Usage frequency and expected lifespan are needed for cost per use.")
     if data.need is None:
         missing_inputs.append("The purpose or need for the purchase was not provided.")
     if data.current is None:
         missing_inputs.append("Information about the current alternative was not provided.")
+    if data.urgency is None and data.purchase_timing is None:
+        missing_inputs.append("Purchase timing and consequences of waiting were not provided.")
+    if data.alternatives_checked is not True:
+        missing_inputs.append("Suitable or lower-cost alternatives have not been confirmed.")
+    if data.repair_investigated is not True and data.current == "It works, but has limitations":
+        missing_inputs.append("Repair feasibility and cost have not been checked.")
+    if data.current == "Mine is broken or unusable" and data.alternative_available is not False:
+        missing_inputs.append("Availability of another usable alternative was not confirmed.")
+    decision, decision_explanation = recommend_purchase(data)
+    confidence = decision_confidence(data)
 
     retrieval_parts = [statement, data.need or "", data.urgency or ""]
     if cost_per_use is not None:
@@ -358,6 +526,10 @@ def evaluate(data: AssessmentInput) -> AssessmentOutput:
         currency=data.currency,
         price=data.price,
         recommendation=recommendation,
+        decision=decision,
+        decision_explanation=decision_explanation,
+        provisional=bool(missing_inputs),
+        confidence=confidence,
         summary=summary,
         factors=factors,
         factor_weights=weights,
@@ -420,24 +592,36 @@ def classify_sentiment(text: str) -> dict[str, object]:
 def calculate_purchase_pressure(data: AssessmentInput | ScoringContext, sentiment: dict[str, object]) -> dict[str, object]:
     """Separate emotional-pressure reflection from financial regret risk."""
     factors: list[dict[str, object]] = []
-    if data.urgency in {"A sale or countdown", "Social pressure or FOMO"}:
-        factors.append({"factor": "Sale, countdown, social pressure, or FOMO was selected", "points": PURCHASE_PRESSURE_WEIGHTS["urgency_or_fomo"]})
+    if data.urgency == "A sale or countdown":
+        factors.append({"factor": "A sale or countdown creates external timing pressure", "points": PURCHASE_PRESSURE_WEIGHTS["urgency_or_fomo"]})
+    elif data.urgency == "Social pressure or FOMO":
+        factors.append({"factor": "Social pressure or FOMO was explicitly mentioned", "points": PURCHASE_PRESSURE_WEIGHTS["social_pressure"]})
+    elif data.urgency == "A genuine deadline":
+        factors.append({"factor": "A practical deadline was explicitly mentioned", "points": PURCHASE_PRESSURE_WEIGHTS["practical_deadline"]})
+    if getattr(data, "purchase_timing", None) == "urgent" and data.urgency in {
+        "A sale or countdown",
+        "Social pressure or FOMO",
+    }:
+        factors.append({"factor": "A practical replacement deadline was also explicitly mentioned", "points": PURCHASE_PRESSURE_WEIGHTS["practical_deadline"]})
+    if getattr(data, "external_pressure", None) is True and data.urgency not in {
+        "A sale or countdown",
+        "Social pressure or FOMO",
+    }:
+        factors.append({"factor": "Social or promotional pressure was explicitly mentioned", "points": PURCHASE_PRESSURE_WEIGHTS["social_pressure"]})
     cues = sentiment.get("emotional_cues", [])
-    if isinstance(cues, list) and any(cue in {"social pressure", "urgency"} for cue in cues):
+    if isinstance(cues, list) and any(cue in {"social pressure", "urgency"} for cue in cues) and data.urgency not in {"A sale or countdown", "Social pressure or FOMO", "A genuine deadline"}:
         factors.append({"factor": "Social or timing pressure appeared in the supplied wording", "points": PURCHASE_PRESSURE_WEIGHTS["social_pressure"]})
     if isinstance(cues, list) and any(cue in {"stress", "emotional context"} for cue in cues):
         factors.append({"factor": "Stress or emotional context was explicitly mentioned", "points": PURCHASE_PRESSURE_WEIGHTS["emotional_context"]})
-    if data.current == "I have something that works":
-        factors.append({"factor": "A working alternative already exists", "points": PURCHASE_PRESSURE_WEIGHTS["working_alternative"]})
-    if data.urgency is None or data.need is None:
-        factors.append({"factor": "Timing or purpose was not fully specified", "points": PURCHASE_PRESSURE_WEIGHTS["limited_consideration"]})
+    if data.alternative_available is False or data.current == "Mine is broken or unusable":
+        factors.append({"factor": "No usable alternative was reported", "points": PURCHASE_PRESSURE_WEIGHTS["no_usable_alternative"]})
     score = min(100, sum(int(item["points"]) for item in factors))
     return {
         "score": score,
         "scale": "0–100 reflection scale; not a probability or diagnosis",
         "band": "high" if score >= 60 else "moderate" if score >= 30 else "low",
         "factors": factors,
-        "explanation": "This score reflects explicit urgency, social/emotional cues, existing alternatives, and missing consideration context. It is separate from financial risk.",
+        "explanation": "This score reflects explicit practical urgency, social or promotional pressure, and stated stress. Missing information is listed separately and does not itself count as purchase pressure.",
         "limitations": "Pressure can be present in a healthy purchase, and a low score does not prove a purchase is suitable.",
     }
 
@@ -446,12 +630,18 @@ def calculate_regret_risk(data: AssessmentInput | ScoringContext, sentiment: dic
     """Score explicit reflective risk factors on a 0-100 design scale."""
     score = 0
     factors: list[dict[str, object]] = []
-    if data.urgency in {"A sale or countdown", "Social pressure or FOMO"}:
+    if data.urgency in {"A sale or countdown", "Social pressure or FOMO"} or (
+        getattr(data, "external_pressure", None) is True
+    ):
         factors.append({"factor": "Sale or social urgency was selected or matched from an explicit cue", "points": REGRET_RISK_WEIGHTS["sale_social_urgency"]})
-    if data.current == "I have something that works":
+    if data.current in {"I have something that works", "It works, but has limitations"}:
         factors.append({"factor": "A working current alternative was described", "points": REGRET_RISK_WEIGHTS["working_alternative"]})
     if data.need == "Mostly a want":
         factors.append({"factor": "Purpose was categorized as mostly discretionary", "points": REGRET_RISK_WEIGHTS["mostly_want"]})
+    if data.alternatives_checked is False:
+        factors.append({"factor": "Suitable or lower-cost alternatives have not been checked", "points": REGRET_RISK_WEIGHTS["unchecked_alternatives"]})
+    if data.repair_investigated is False and data.current == "It works, but has limitations":
+        factors.append({"factor": "Repair feasibility or cost remains unknown for the limited current item", "points": REGRET_RISK_WEIGHTS["unchecked_repair"]})
     if (
         data.price is not None
         and data.budget is not None
@@ -459,8 +649,8 @@ def calculate_regret_risk(data: AssessmentInput | ScoringContext, sentiment: dic
     ):
         factors.append({"factor": "Entered total exceeds the entered budget", "points": REGRET_RISK_WEIGHTS["budget_overrun"]})
     cues = sentiment.get("emotional_cues", [])
-    if isinstance(cues, list) and any(cue in {"stress", "emotional context", "social pressure", "urgency"} for cue in cues):
-        factors.append({"factor": "Stress, emotional context, social pressure, or urgency was explicitly mentioned", "points": REGRET_RISK_WEIGHTS["explicit_emotional_pressure"]})
+    if isinstance(cues, list) and any(cue in {"stress", "emotional context"} for cue in cues):
+        factors.append({"factor": "Stress or emotional context was explicitly mentioned", "points": REGRET_RISK_WEIGHTS["explicit_emotional_pressure"]})
     score = min(100, sum(int(item["points"]) for item in factors))
     return {
         "score": score,
