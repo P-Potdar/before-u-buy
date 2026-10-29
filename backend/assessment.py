@@ -300,8 +300,15 @@ def recommend_purchase(
     ):
         waiting_period = getattr(data, "waiting_period", None)
         wait_detail = f" You said you can wait {waiting_period}." if isinstance(waiting_period, str) else " You said the purchase is not urgent."
-        pressure_detail = " The sale deadline should not determine the decision, especially with upcoming expenses and uncertain affordability." if data.urgency == "A sale or countdown" and getattr(data, "upcoming_expenses", None) is True else ""
-        return "WAIT", "Your current item still works." + wait_detail + pressure_detail + " Compare the specific improvement and suitable alternatives before choosing; external pressure alone does not establish a need to buy now."
+        if data.urgency == "A sale or countdown":
+            pressure_detail = " The sale deadline should not determine the decision."
+            if getattr(data, "upcoming_expenses", None) is True and affordability_unknown:
+                pressure_detail = " The sale deadline should not determine the decision, especially with upcoming expenses and uncertain affordability."
+        elif data.urgency == "Social pressure or FOMO":
+            pressure_detail = " External pressure alone does not establish a need to buy now."
+        else:
+            pressure_detail = ""
+        return "WAIT", "Your current item still works." + wait_detail + pressure_detail + " Compare the specific improvement and suitable alternatives before choosing."
     if urgent_replacement and (data.alternatives_checked is not True or affordability_unknown):
         return "WAIT", "The replacement need is time-sensitive; compare suitable models and the stated financial details promptly before choosing this specific option."
     if data.urgency in {"A sale or countdown", "Social pressure or FOMO"}:
@@ -560,7 +567,9 @@ def classify_sentiment(text: str) -> dict[str, object]:
     negative = {"stress", "stressed", "anxious", "worried", "pressure", "regret", "sad", "emotional"}
     positive_hits = sorted(set(normalized.split()) & positive)
     negative_hits = sorted(set(normalized.split()) & negative)
-    if len(positive_hits) > len(negative_hits):
+    if positive_hits and negative_hits:
+        label = "mixed"
+    elif len(positive_hits) > len(negative_hits):
         label = "positive"
     elif len(negative_hits) > len(positive_hits):
         label = "negative"

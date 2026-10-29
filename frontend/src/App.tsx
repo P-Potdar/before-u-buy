@@ -64,7 +64,16 @@ type Assessment = {
   disclaimer: string;
 };
 
-type ChatTurn = { role: 'user' | 'assistant'; text: string };
+type ChatTurn = {
+  role: 'user' | 'assistant';
+  text: string;
+  provider?: string;
+  model?: string | null;
+  fallbackReason?: string | null;
+  fallbackOccurred?: boolean;
+  ragUsed?: boolean;
+  evidenceCount?: number;
+};
 type DecisionScore = {
   score: number;
   band: string;
@@ -99,6 +108,14 @@ type ChatDecisionState = {
   regret_risk: DecisionScore;
   estimated_total_uses: number | null;
   estimated_cost_per_use: number | null;
+  cost_per_use_basis: {
+    uses_per_week: number | null;
+    uses_per_week_source: string | null;
+    lifespan_years: number | null;
+    lifespan_source: string | null;
+    weeks_per_year: number;
+    status: string;
+  };
   budget_exceeded_by: number | null;
   financial_context: ChatFinancialContext;
   replacement_context: ChatReplacementContext;
@@ -115,17 +132,37 @@ type ChatApiResponse = {
   provider: string;
   model: string | null;
   fallback_reason: string | null;
+  fallback_occurred: boolean;
   tools_used: string[];
   knowledge_sources: Source[];
   assessment_update: Assessment | null;
   session_facts: Record<string, unknown>;
   decision_state: ChatDecisionState;
+  rag: { enabled: boolean; used: boolean; evidence_count: number };
+  sentiment_analysis: {
+    polarity: { label: string };
+    emotions: { label: string }[];
+    purchase_signals: Record<string, { value: boolean | null; evidence: string[] }>;
+    insufficient_evidence: boolean;
+    provenance: string;
+  };
 };
 type ModelCatalog = {
   provider: string;
   connected: boolean;
   models: string[];
   selected_model: string | null;
+};
+
+type ModelStatus = 'checking' | 'connected' | 'offline' | 'disabled' | 'unknown';
+type ProviderStatusResponse = {
+  configured_provider: string;
+  enabled: boolean;
+  reachable: boolean;
+  models: string[];
+  selected_model: string | null;
+  status: string;
+  reason: string | null;
 };
 type DecisionRecord = {
   id: string;
@@ -173,14 +210,26 @@ function assertChatApiResponse(value: unknown): asserts value is ChatApiResponse
   if (
     !isRecord(value)
     || typeof value.reply !== 'string'
+    || !value.reply.trim()
     || typeof value.session_id !== 'string'
     || typeof value.processing_ms !== 'number'
     || typeof value.provider !== 'string'
     || (value.model !== null && typeof value.model !== 'string')
     || (value.fallback_reason !== null && typeof value.fallback_reason !== 'string')
+    || typeof value.fallback_occurred !== 'boolean'
     || !isStringArray(value.tools_used)
     || !Array.isArray(value.knowledge_sources)
     || !isRecord(value.session_facts)
+    || !isRecord(value.rag)
+    || typeof value.rag.enabled !== 'boolean'
+    || typeof value.rag.used !== 'boolean'
+    || typeof value.rag.evidence_count !== 'number'
+    || !isRecord(value.sentiment_analysis)
+    || !isRecord(value.sentiment_analysis.polarity)
+    || typeof value.sentiment_analysis.polarity.label !== 'string'
+    || !Array.isArray(value.sentiment_analysis.emotions)
+    || !isRecord(value.sentiment_analysis.purchase_signals)
+    || typeof value.sentiment_analysis.insufficient_evidence !== 'boolean'
     || (value.assessment_update !== null && !isRecord(value.assessment_update))
   ) {
     throw new Error('The chat response was missing required conversation data.');
@@ -258,12 +307,14 @@ function App() {
   const [chatFallbackReason, setChatFallbackReason] = useState('');
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
-  const [modelStatus, setModelStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
+  const [modelStatus, setModelStatus] = useState<ModelStatus>('checking');
+  const [providerStatusText, setProviderStatusText] = useState('Checking Ollama status…');
   const [retryMessage, setRetryMessage] = useState('');
   const [chatTools, setChatTools] = useState<string[]>([]);
   const [followupSources, setFollowupSources] = useState<Source[]>([]);
   const [sessionFacts, setSessionFacts] = useState<Record<string, unknown>>({});
   const [chatDecision, setChatDecision] = useState<ChatDecisionState | null>(null);
+  const [chatSentiment, setChatSentiment] = useState<ChatApiResponse['sentiment_analysis'] | null>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const chatBusyRef = useRef(false);
   const decisionGeneration = useRef(0);
@@ -285,19 +336,24 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    fetch(`${apiBase}/api/models`, { headers: { Accept: 'application/json' } })
-      .then(async response => {
-        if (!response.ok) throw new Error(`Model discovery failed with status ${response.status}.`);
-        return await response.json() as ModelCatalog;
-      })
-      .then(catalog => {
+    Promise.all([
+      fetch(`${apiBase}/api/models`, { headers: { Accept: 'application/json' } }),
+      fetch(`${apiBase}/api/provider/status`, { headers: { Accept: 'application/json' } }),
+    ]).then(async ([modelsResponse, statusResponse]) => {
+      if (!modelsResponse.ok || !statusResponse.ok) throw new Error('Provider discovery failed.');
+      return [await modelsResponse.json() as ModelCatalog, await statusResponse.json() as ProviderStatusResponse] as const;
+    }).then(([catalog, status]) => {
         if (!active) return;
         setModelChoices(catalog.models);
         setSelectedModel(catalog.selected_model ?? '');
-        setModelStatus(catalog.connected ? 'connected' : 'offline');
+        setProviderStatusText(status.reason ?? (status.status === 'available' ? 'Ollama enabled and reachable.' : `Ollama ${status.status}.`));
+        setModelStatus(status.status === 'disabled' ? 'disabled' : status.status === 'available' ? 'connected' : status.reachable ? 'offline' : 'offline');
       })
       .catch(() => {
-        if (active) setModelStatus('offline');
+        if (active) {
+          setModelStatus('unknown');
+          setProviderStatusText('Ollama status unknown');
+        }
       });
     return () => { active = false; };
   }, []);
@@ -383,6 +439,7 @@ function App() {
     setFollowupSources([]);
     setSessionFacts({});
     setChatDecision(null);
+    setChatSentiment(null);
     setAssessmentContext(null);
     setAssessmentContextPending(false);
   }
@@ -399,7 +456,12 @@ function App() {
     setFollowupSources([]);
     setSessionFacts({});
     setChatDecision(null);
-    setAssessmentContextPending(assessmentContext !== null);
+    setChatSentiment(null);
+    // A new conversation must not inherit facts from a guided assessment or
+    // another chat. The assessment result remains visible in its own section,
+    // but it is not sent as context to the new chat session.
+    setAssessmentContext(null);
+    setAssessmentContextPending(false);
     setRetryMessage('');
     setError('');
   }
@@ -430,7 +492,11 @@ function App() {
       setAssessmentContext(payload);
       setAssessmentContextPending(true);
       setSessionId(crypto.randomUUID());
-      setChatTurns([{ role: 'assistant', text: assessment.summary }]);
+      // Keep the structured assessment in the assessment section. It is not a
+      // conversational assistant message and must not appear in chat history.
+      setChatTurns([]);
+      setChatDecision(null);
+      setSessionFacts({});
     } catch (cause) {
       if (requestGeneration === decisionGeneration.current) {
         setError(cause instanceof Error ? cause.message : 'Assessment could not be completed.');
@@ -629,14 +695,24 @@ function App() {
       setChatTiming(data.processing_ms);
       setChatProvider(data.provider);
       setActiveModel(data.model ?? '');
-      setChatFallbackReason(data.fallback_reason ?? '');
+      setChatFallbackReason(data.provider === 'deterministic_fallback' ? (data.fallback_reason ?? '') : '');
       setChatTools(data.tools_used);
       setFollowupSources(data.knowledge_sources);
       setSessionFacts(data.session_facts);
       setChatDecision(data.decision_state);
+      setChatSentiment(data.sentiment_analysis);
       setRetryMessage('');
       if (data.assessment_update) setResult(data.assessment_update);
-      setChatTurns(previous => [...previous, { role: 'assistant', text: data.reply }]);
+      setChatTurns(previous => [...previous, {
+        role: 'assistant',
+        text: data.reply.trim(),
+        provider: data.provider,
+        model: data.model,
+        fallbackReason: data.fallback_reason,
+        fallbackOccurred: data.fallback_occurred,
+        ragUsed: data.rag.used,
+        evidenceCount: data.rag.evidence_count,
+      }]);
     } catch (cause) {
       if (requestGeneration === decisionGeneration.current) {
         setError(cause instanceof Error ? cause.message : 'The conversation reply failed.');
@@ -865,12 +941,35 @@ function App() {
             </select>
           </label>
           <span className={`model-status ${modelStatus}`} role="status">
-            <i />{modelStatus === 'checking' ? 'Checking local models…' : modelStatus === 'connected' ? `${modelChoices.length} local model${modelChoices.length === 1 ? '' : 's'} available` : 'Local model unavailable · fallback ready'}
+            <i />{modelStatus === 'checking'
+              ? 'Checking local models…'
+              : modelStatus === 'connected'
+                ? `${modelChoices.length} local model${modelChoices.length === 1 ? '' : 's'} available`
+                : modelStatus === 'disabled'
+                  ? 'Ollama disabled'
+                  : modelStatus === 'unknown'
+                    ? 'Ollama status unknown'
+                    : 'No Ollama model available · fallback ready'}
           </span>
         </div>
         <div className="chat-log" ref={chatLogRef} aria-live="polite" aria-relevant="additions text">
           {chatTurns.length === 0 && !chatBusy && <p className="chat-empty">Share a thought, ask a question, or add context in your own words. You can start chatting without filling in the assessment.</p>}
-          {chatTurns.map((turn, index) => <p className={`chat-bubble ${turn.role}`} key={`${turn.role}-${index}`}>{turn.text}</p>)}
+          {chatTurns.map((turn, index) => (
+            <div className={`chat-bubble ${turn.role}`} key={`${turn.role}-${index}`}>
+              <p>{turn.text}</p>
+              {turn.role === 'assistant' && turn.provider && (
+                <small className="chat-reply-provenance" role="status">
+                  {turn.provider === 'ollama'
+                    ? `Qwen response · Ollama${turn.model ? ` · ${turn.model}` : ''}${turn.ragUsed ? ` · RAG (${turn.evidenceCount} source${turn.evidenceCount === 1 ? '' : 's'})` : ' · No relevant evidence retrieved'}`
+                    : turn.provider === 'gemini'
+                      ? `Gemini response${turn.model ? ` · ${turn.model}` : ''}${turn.fallbackOccurred ? ' · Ollama fallback' : ''}${turn.ragUsed ? ` · RAG (${turn.evidenceCount} source${turn.evidenceCount === 1 ? '' : 's'})` : ' · No relevant evidence retrieved'}`
+                    : turn.fallbackReason?.toLowerCase().includes('disabled')
+                      ? 'Ollama disabled'
+                      : `Deterministic fallback · ${turn.fallbackReason?.replace('; deterministic fallback is active.', '') || 'Ollama response unavailable'}`}
+                </small>
+              )}
+            </div>
+          ))}
           {chatBusy && (
             <div className="chat-bubble assistant thinking" role="status" aria-live="polite">
               <span>{selectedModel ? `${selectedModel} is thinking` : 'Thinking through your message'}</span>
@@ -882,10 +981,12 @@ function App() {
         {chatDecision && (
           <section className="chat-decision" aria-live="polite" aria-label="Updated purchase reflection">
             <div className="chat-decision-heading">
-              <div><p className="eyebrow">UPDATED FROM THIS CONVERSATION</p><h3>{chatDecision.recommendation}</h3></div>
+              <div><p className="eyebrow">DECISION SUMMARY FROM THIS CONVERSATION</p><h3>{chatDecision.recommendation}</h3></div>
               {chatDecision.provisional && <span className="provisional-label">Provisional</span>}
             </div>
             <p>{chatDecision.recommendation_explanation}</p>
+            <details className="chat-assessment-details">
+              <summary>Show structured assessment details</summary>
             <p className="small"><b>Evidence completeness: {chatDecision.confidence.level}.</b> {chatDecision.confidence.basis}</p>
             {(chatDecision.financial_context.product_price !== null
               || chatDecision.financial_context.stated_budget !== null
@@ -957,7 +1058,7 @@ function App() {
               <span>Regret-risk reflection <b>{chatDecision.regret_risk.score}/100</b></span>
             </div>
             {chatDecision.estimated_total_uses !== null && chatDecision.estimated_cost_per_use !== null && (
-              <p className="small">Estimated uses: {chatDecision.estimated_total_uses.toLocaleString()} · Cost per use: {chatDecision.estimated_cost_per_use.toFixed(2)} (52 weeks/year; estimate from details you supplied)</p>
+              <p className="small">Estimated uses: {chatDecision.estimated_total_uses.toLocaleString()} · Cost per use: {chatDecision.estimated_cost_per_use.toFixed(2)} ({chatDecision.cost_per_use_basis.uses_per_week_source ?? 'usage input'}, {chatDecision.cost_per_use_basis.weeks_per_year} weeks/year, {chatDecision.cost_per_use_basis.lifespan_source ?? 'lifespan input'})</p>
             )}
             {(chatDecision.supporting_factors.length > 0 || chatDecision.factors_to_consider.length > 0) && (
               <div className="chat-decision-factors">
@@ -967,6 +1068,7 @@ function App() {
             )}
             {chatDecision.missing_inputs.length > 0 && <p className="small"><b>Still unknown:</b> {chatDecision.missing_inputs.join(' ')}</p>}
             <p className="caveat">{chatDecision.limitations}</p>
+            </details>
           </section>
         )}
         <form className="chat-form" onSubmit={sendChat}>
@@ -987,10 +1089,21 @@ function App() {
         <p className="small chat-meta">
           {chatTiming !== null
             ? `Reply processing: ${chatTiming} ms · Provider: ${chatProvider}${activeModel ? ` · Model: ${activeModel}` : ''} · Tools used: ${chatTools.join(', ') || 'none'}`
-            : modelStatus === 'connected' ? 'A local model is available; responses may take several seconds.' : 'Deterministic responses remain available when no local model is connected.'}
+            : providerStatusText}
         </p>
           {chatFallbackReason && <p className="small chat-fallback-note" role="status">{chatFallbackReason} A deterministic response was used instead.</p>}
         {followupSources.length > 0 && <div className="chat-sources"><b>Sources for this reply:</b> {followupSources.map((source, index) => <span key={`${source.url}-${index}`}>{index > 0 && ' · '}<a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></span>)}</div>}
+        {chatSentiment && <p className="small chat-sentiment" role="status">
+          <b>Message analysis:</b> {chatSentiment.polarity.label}
+          {chatSentiment.emotions.length > 0 && ` · emotions: ${chatSentiment.emotions.map(item => item.label).join(', ')}`}
+          {(() => {
+            const explicit = Object.entries(chatSentiment.purchase_signals)
+              .filter(([, signal]) => signal.value === true)
+              .map(([label]) => label.split('_').join(' '));
+            return explicit.length > 0 ? ` · signals: ${explicit.join(', ')}` : '';
+          })()}
+          {chatSentiment.insufficient_evidence ? ' · insufficient sentiment evidence' : ''}
+        </p>}
         {Object.entries(sessionFacts).some(([key]) => key !== 'fact_evidence') && <p className="small">Facts recognized from your messages: {Object.entries(sessionFacts).filter(([key]) => key !== 'fact_evidence').map(([key, value]) => `${key.split('_').join(' ')}: ${String(value)}`).join(' · ')}</p>}
         <p className="small chat-privacy">Conversation context is temporary and held in backend memory; it clears on restart or when you start a new conversation.</p>
       </section>

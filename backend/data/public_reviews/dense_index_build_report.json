@@ -1,0 +1,17 @@
+{
+  "scenario_index": {
+    "index_version": "dense-1",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "record_count": 2048
+  },
+  "review_index": {
+    "index_version": "dense-1",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "record_count": 4933
+  },
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "device": "cpu",
+  "elapsed_seconds": 48.548
+}

@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 import json
 import pytest
@@ -61,6 +63,34 @@ def test_chat_fallback_is_neutral_and_reports_actual_tools(monkeypatch):
     assert "buy" not in result["reply"].lower()
     assert "knowledge_retrieval" in result["tools_used"]
     assert result["session_id"] == "test-session"
+    assert result["sentiment_analysis"]["polarity"]["label"] in {"positive", "negative", "neutral", "mixed", "uncertain"}
+    assert result["sentiment_analysis"]["purchase_signals"]["sales_pressure"]["value"] is True
+
+
+def test_chat_assessment_context_is_scoped_to_the_supplied_session(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    first = client.post("/api/chat", json={
+        "message": "Help me reflect on this purchase.",
+        "session_id": "assessment-context-session",
+        "assessment_context": {
+            "name": "Headphones",
+            "price": 18000,
+            "currency": "INR",
+            "scenario": "Daily commuting and calls",
+        },
+    })
+    assert first.status_code == 200
+    assert first.json()["session_facts"]["price"] == 18000
+
+    fresh = client.post("/api/chat", json={
+        "message": "Should I buy a phone?",
+        "session_id": "fresh-no-assessment-context-session",
+    })
+    assert fresh.status_code == 200
+    facts = fresh.json()["session_facts"]
+    assert "price" not in facts
+    assert facts.get("name") == "Phone"
+    assert "scenario" not in facts
 
 
 def test_chat_rejects_blank_message():
@@ -130,6 +160,28 @@ def test_chat_uses_only_a_discovered_model_and_reports_provider(monkeypatch):
     assert response.json()["model"] == "qwen3:4b"
 
 
+def test_model_wording_cannot_override_canonical_decision(monkeypatch):
+    async def discovered():
+        return ["qwen3:4b"]
+
+    async def conflicting_reply(*_args):
+        return "BUY is the right call."
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(main, "_available_ollama_models", discovered)
+    monkeypatch.setattr(main, "_ollama_reply", conflicting_reply)
+    response = client.post("/api/chat", json={
+        "message": "I want headphones for ₹18,000. My current headphones work perfectly and I can wait one month.",
+        "session_id": "model-conflicting-verdict",
+        "model": "qwen3:4b",
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert result["provider"] == "ollama"
+    assert result["decision_state"]["recommendation"] == "WAIT"
+    assert result["decision_state"]["signal"] == "WAIT"
+
+
 def test_chat_passes_prior_turns_to_the_selected_local_model(monkeypatch):
     async def discovered():
         return ["qwen3:4b"]
@@ -155,7 +207,8 @@ def test_chat_passes_prior_turns_to_the_selected_local_model(monkeypatch):
         "model": "qwen3:4b",
     })
     assert second.status_code == 200
-    assert second.json()["provider"] == "ollama"
+    assert second.json()["provider"] == "deterministic_fallback"
+    assert "disabled" in second.json()["fallback_reason"].lower()
 
 
 def test_chat_unavailable_selected_model_is_identified_as_fallback(monkeypatch):
@@ -791,6 +844,55 @@ def test_ollama_separate_thinking_field_is_never_returned(monkeypatch):
     reply = asyncio.run(main._ollama_reply([], [], None))
     assert reply == "We can reflect on the details you shared without choosing for you."
     assert "Private internal reasoning" not in reply
+
+
+def test_ollama_prompt_contains_bounded_retrieved_evidence(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"content": json.dumps({
+                "assistant_message": "The supplied note supports pausing and comparing alternatives.",
+                "detected_facts": {},
+            })}}
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    reply = asyncio.run(main._ollama_reply(
+        [],
+        [{
+            "topic": "Need vs. want",
+            "title": "MyMoney.gov",
+            "source": "https://www.mymoney.gov/",
+            "url": "https://www.mymoney.gov/",
+            "points": ["Compare a purchase against essentials and alternatives."],
+        }],
+        None,
+        facts={"_sentiment_analysis": {"polarity": {"label": "mixed"}}},
+    ))
+    assert reply
+    prompt = captured["json"]["messages"][0]["content"]
+    assert "Retrieved knowledge-base evidence" in prompt
+    assert "Compare a purchase against essentials and alternatives." in prompt
+    assert "untrusted reference material" in prompt
+    assert "Structured message signals" in prompt
 
 
 def test_ollama_thinking_only_response_is_rejected(monkeypatch):

@@ -1,0 +1,52 @@
+{
+  "model_type": "multinomial_naive_bayes",
+  "seed": "sha1(parent_asin) modulo 5; deterministic grouped split",
+  "train_records": 3926,
+  "test_records": 1007,
+  "train_products": 3707,
+  "test_products": 941,
+  "accuracy": 0.6544190665342602,
+  "majority_baseline": {
+    "label": "Negative",
+    "accuracy": 0.31479642502482624
+  },
+  "per_class": {
+    "Negative": {
+      "precision": 0.5604651162790698,
+      "recall": 0.7602523659305994,
+      "f1": 0.6452476572958501
+    },
+    "Neutral": {
+      "precision": 0.9096774193548387,
+      "recall": 0.42342342342342343,
+      "f1": 0.5778688524590163
+    },
+    "Positive": {
+      "precision": 0.6563981042654028,
+      "recall": 0.7759103641456583,
+      "f1": 0.7111681643132222
+    }
+  },
+  "macro_f1": 0.6447615580226962,
+  "confusion_matrix": {
+    "Negative": {
+      "Negative": 241,
+      "Positive": 71,
+      "Neutral": 5
+    },
+    "Neutral": {
+      "Negative": 118,
+      "Neutral": 141,
+      "Positive": 74
+    },
+    "Positive": {
+      "Positive": 277,
+      "Negative": 71,
+      "Neutral": 9
+    }
+  },
+  "limitations": [
+    "The source sentiment labels are dataset annotations classified with Mistral, not independent human labels.",
+    "This model is QA/supporting classification only; it does not predict purchase suitability or BUY/WAIT/DON'T BUY."
+  ]
+}

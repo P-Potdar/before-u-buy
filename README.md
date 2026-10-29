@@ -8,10 +8,11 @@ A neutral, local-first purchase reflection app. It shows which details were supp
 - **Backend:** FastAPI + Pydantic (`backend/main.py`)
 - **Assessment:** transparent deterministic heuristic, calculations, and shared BUY / WAIT / DON'T BUY decision rules (`backend/assessment.py`)
 - **Conversation assessment:** rule-based extraction with per-session facts, evidence metadata, deterministic scores, and a provisional BUY / WAIT / DON'T BUY decision signal (`backend/main.py`)
+- **Sentiment/context analysis:** separate polarity, multi-label emotions, and purchase signals with exact supporting spans (`backend/sentiment.py`). These are transparent weak labels, not psychological, financial, or purchase-decision predictions.
 - **Regression scenarios:** small, synthetic baseline set used only for extraction and decision-invariant tests (`backend/data/purchase_scenarios.jsonl`)
 - **Purchase dataset:** reproducible synthetic decision corpus and quality report (`backend/data/purchase_decision_dataset.jsonl`, `backend/data/purchase_decision_dataset_quality.json`)
-- **Semantic retrieval:** offline hashed word/bigram index with version checks and deterministic evaluation (`backend/retrieval.py`, `backend/data/purchase_decision_index.json`)
-- **Knowledge retrieval:** normalized, weighted local Markdown notes (`backend/knowledge.py`, `data/common/`)
+- **Semantic retrieval:** offline hashed word/bigram baseline with version checks, plus an optional local MiniLM dense index when its installed dependency/model is available (`backend/retrieval.py`, `backend/dense_retrieval.py`)
+- **RAG knowledge retrieval:** normalized, weighted local Markdown notes are retrieved at chat time, bounded into the Qwen prompt as untrusted evidence, and returned with source provenance (`backend/knowledge.py`, `data/common/`)
 - **PDF:** generated server-side by ReportLab at `POST /api/report/pdf`
 - **Optional LLM:** installed local Ollama models are discovered at runtime; deterministic fallback remains available
 - **Dashboard and journal:** the initial Overview is backed by local SQLite records; journal entries can be reviewed, updated, exported, or removed
@@ -57,7 +58,7 @@ npm run dev
 
 Open <http://localhost:5173>. The Vite development server proxies `/api` and `/health` to `http://127.0.0.1:8000`.
 
-## Optional Ollama
+## Ollama and local RAG
 
 If Ollama is installed, start its local service and inspect existing models first:
 
@@ -65,16 +66,26 @@ If Ollama is installed, start its local service and inspect existing models firs
 ollama list
 ```
 
-On the inspected Mac, `qwen3:4b` was already installed. The app discovers installed models through `GET /api/models` and makes them selectable in the chat UI, so a model name can be selected there without changing `.env`. To use a configured default instead, set:
+The example configuration enables Ollama with `qwen3:4b`; set `LLM_PROVIDER=none` deliberately when deterministic fallback is desired. The app discovers installed models through `GET /api/models`. Runtime reachability and installed-model state are available from `GET /api/provider/status` and are not inferred from the configured model name.
 
 ```dotenv
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=qwen3:4b
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_TIMEOUT_SECONDS=60
+OLLAMA_TIMEOUT_SECONDS=35
 ```
 
-Restart the backend after changing the environment. Model choices are validated against Ollama's model list. The discovered local model is selectable in the UI; each reply reports the actual provider/model. A prior live browser test found `qwen3:4b`; its reasoning-style output was rejected, and the user received a clearly labeled deterministic fallback. Ollama is now requested to return the `StructuredChatResponse` JSON schema; the backend validates the full response and exposes only `assistant_message`. It ignores the separate Ollama `thinking` field, rejects malformed JSON, reasoning markers, unsafe answers, or invented money, and falls back explicitly. The new structured-output path has regression tests but has not yet been verified with a successful live Ollama/browser inference. No model was fine-tuned or downloaded; do not download additional weights without deciding first.
+Restart the backend after changing the environment. Model choices are validated against Ollama's model list. The discovered local model is selectable in the UI; each reply reports the actual provider/model. Ollama is requested to return the `StructuredChatResponse` JSON schema with `think: false`; the backend validates the full response, ignores the separate Ollama `thinking` field, and safely extracts schema-valid content after an explicit closing think marker. Empty, malformed, reasoning-only, unsafe, or invented-money responses fall back explicitly. The default provider timeout is 35 seconds, which leaves bounded room for the observed cold-start latency without keeping the UI waiting indefinitely. No model was fine-tuned or downloaded; do not download additional weights without deciding first.
+
+For a chat request, local Markdown notes are normalized and ranked first. The top notes are passed into the Qwen system context with topic, title, source URL, and bullet evidence. The prompt treats retrieved text as untrusted reference material: it cannot override user facts or the deterministic verdict. The API returns `rag.enabled`, `rag.used`, `rag.evidence_count`, and sanitized source metadata. The frontend labels each assistant turn as Qwen with RAG, Qwen without relevant evidence, or deterministic fallback. This RAG path is educational guidance, not product research or verified pricing.
+
+### Gemini fallback
+
+The default chain is local-first: Ollama is attempted first, Gemini once when Ollama is disabled or unavailable, then the deterministic response. Gemini uses the official `google-genai` SDK and the configured model is checked through the Gemini model-list API when Gemini is selected. The example uses supported `gemini-2.5-flash-lite`; set `GEMINI_API_KEY` and `GEMINI_MODEL` in `.env` without committing the key. Missing credentials, authentication/quota errors, timeouts, unavailable models, and malformed responses remain safe deterministic fallbacks and never expose provider details or secrets.
+
+### Sentiment labels and verification status
+
+The live chat returns `sentiment_analysis` with separate `polarity`, `emotions`, and `purchase_signals`. Each detected label includes evidence spans, a deterministic method, and heuristic confidence; absent signals remain `unknown`. Sentiment never changes the canonical decision. The original `sentiment_labels.csv` has 30 balanced polarity examples and is **PARTIALLY_VERIFIED**: its schema and labels are auditable, but the repository contains no independent annotation record. `sentiment_context_labels.jsonl` contains 10 project-authored examples and is **UNVERIFIED**, not human validation. The acquired public-review sentiment labels are **PARTIALLY_VERIFIED** source annotations: their dataset card attributes them to Mistral classification, not independent human ground truth. Run `python scripts/validate_sentiment_labels.py` and `python scripts/evaluate_sentiment.py` to reproduce schema and baseline reports.
 
 The chat accepts up to 2,000 characters per message, retains a bounded in-memory turn history for follow-ups, supports Enter to send and Shift+Enter for a new line, and can start a separate conversation without clearing the assessment. While a reply is being generated, an accessible animated thinking indicator is shown. Local model replies are not streamed; the indicator remains visible until the response or timeout returns.
 
@@ -120,11 +131,16 @@ The endpoint returns `application/pdf` as `beforeyoubuy-review.pdf`. The documen
 source .venv/bin/activate
 pytest -q
 
-# Rebuild and validate the local purchase corpus and retrieval index
+# Rebuild and validate the local purchase corpus and lexical retrieval index
 python scripts/generate_purchase_dataset.py
 python scripts/validate_purchase_dataset.py
 python scripts/build_purchase_index.py
 python scripts/evaluate_purchase_retrieval.py
+
+# Optional dense indexes/evaluation; requires the already-installed local
+# sentence-transformers stack and its cached model, and does not download one.
+python scripts/build_dense_indexes.py
+python scripts/evaluate_dense_retrieval.py
 
 # Frontend type check and production build
 cd frontend
@@ -153,8 +169,10 @@ From the project root, run `python scripts/package_project.py`. This scans for s
 ## API endpoints
 
 - `GET /health` — service and configured chat mode
+- `GET /api/models` — installed Ollama model names when enabled
+- `GET /api/provider/status` — sanitized configured/enabled/reachable/model status
 - `POST /api/assess` — validated assessment result, sources, missing inputs, tools used, and processing time
-- `POST /api/chat` — short-lived conversation context, explicit fact extraction/corrections, assessment/retrieval, `decision_state`, and a deterministic or schema-validated Ollama reply
+- `POST /api/chat` — short-lived conversation context, explicit fact extraction/corrections, deterministic assessment, RAG provenance, `decision_state`, and a deterministic or schema-validated Ollama reply
 - `POST /api/report/pdf` — downloadable PDF
 - `POST /api/products/search` — optional provider-backed India/INR search with explicit live/cache/unavailable states
 - `GET /api/watchlist/{id}/history` and `POST /api/watchlist/{id}/refresh` — observations and manual refresh

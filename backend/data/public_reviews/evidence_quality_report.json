@@ -1,0 +1,19 @@
+{
+  "source_records": 4933,
+  "evidence_records": 15103,
+  "aspects": {
+    "battery_life": 1372,
+    "comfort": 918,
+    "compatibility": 1730,
+    "customer_support": 1017,
+    "durability": 479,
+    "ease_of_use": 3082,
+    "performance": 2031,
+    "price_value": 1588,
+    "reliability": 2886
+  },
+  "method": "deterministic sentence-level aspect matching; source sentiment retained without relabeling",
+  "limitations": [
+    "Aspect lexicon misses implicit aspects and does not establish causality or population rates."
+  ]
+}

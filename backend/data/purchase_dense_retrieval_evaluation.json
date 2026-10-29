@@ -1,0 +1,24 @@
+{
+  "dataset_records": 2048,
+  "train_records": 960,
+  "held_out_records": 1088,
+  "evaluated_query_count": 272,
+  "split": "stable product-name parity; one product per category held out",
+  "relevance": "same product category and matching need class or product condition",
+  "metrics": {
+    "dense": {
+      "recall_at_5": 0.29044117647058826,
+      "precision_at_5": 0.10955882352941171,
+      "mrr_at_5": 0.1814950980392157
+    },
+    "lexical": {
+      "recall_at_5": 0.08823529411764706,
+      "precision_at_5": 0.01764705882352942,
+      "mrr_at_5": 0.020220588235294122
+    }
+  },
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "limitations": [
+    "Synthetic relevance labels are consistency labels, not human judgments."
+  ]
+}

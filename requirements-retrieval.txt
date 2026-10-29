@@ -1,0 +1,3 @@
+# Optional local dense retrieval/training stack. The core app still falls back
+# to the dependency-free hashed index if this stack or its model is unavailable.
+sentence-transformers==6.2.0

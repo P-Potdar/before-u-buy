@@ -1,0 +1,15 @@
+{
+  "record_count": 4933,
+  "unique_id_count": 4933,
+  "unique_text_count": 4933,
+  "sentiments": {
+    "Negative": 1665,
+    "Neutral": 1602,
+    "Positive": 1666
+  },
+  "aspects": {},
+  "validation_failures": [],
+  "valid": true,
+  "evidence_record_count": 15103,
+  "evidence_validation_failures": []
+}

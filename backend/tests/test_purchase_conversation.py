@@ -10,12 +10,118 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import httpx
+import pytest
 
 from backend import main
 from backend.main import app
 
 
 client = TestClient(app)
+
+
+def test_ollama_parser_accepts_clean_schema_content():
+    parsed = main._parse_ollama_structured_response(
+        '{"assistant_message":"Compare the price with your stated budget.","detected_facts":{}}'
+    )
+
+    assert parsed is not None
+    assert main._clean_ollama_final_text(parsed.assistant_message) == "Compare the price with your stated budget."
+
+
+def test_ollama_parser_extracts_schema_content_after_think_marker():
+    parsed = main._parse_ollama_structured_response(
+        'internal planning...</think>{"assistant_message":"WAIT remains the deterministic decision.","detected_facts":{}}'
+    )
+
+    assert parsed is not None
+    assert parsed.assistant_message == "WAIT remains the deterministic decision."
+
+
+def test_ollama_parser_rejects_thinking_only_empty_and_malformed_content():
+    assert main._parse_ollama_structured_response("internal planning only") is None
+    assert main._parse_ollama_structured_response("<think>internal planning</think>") is None
+    assert main._parse_ollama_structured_response("") is None
+    assert main._parse_ollama_structured_response('{"assistant_message":}') is None
+
+
+class _FakeOllamaResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("unsupported parameter", request=httpx.Request("POST", "http://ollama"), response=self)
+
+    def json(self):
+        return {"message": {"content": json.dumps({"assistant_message": "A concise reflection.", "detected_facts": {}})}}
+
+
+class _FakeOllamaClient:
+    def __init__(self, error=None, response=None, captured=None):
+        self.error = error
+        self.response = response
+        self.captured = captured
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def post(self, *_args, **_kwargs):
+        if self.captured is not None:
+            self.captured.update(_kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [httpx.TimeoutException("slow"), httpx.ConnectError("down")],
+)
+def test_ollama_transport_failures_fall_back_without_exposing_provider_errors(monkeypatch, provider_error):
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **_kwargs: _FakeOllamaClient(error=provider_error))
+
+    result = asyncio.run(main._ollama_reply([], [], None, "test-model", {"name": "Headphones"}))
+
+    assert result is None
+
+
+def test_ollama_unsupported_generation_response_falls_back(monkeypatch):
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    monkeypatch.setattr(
+        main.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeOllamaClient(response=_FakeOllamaResponse(400)),
+    )
+
+    result = asyncio.run(main._ollama_reply([], [], None, "test-model", {"name": "Headphones"}))
+
+    assert result is None
+
+
+def test_ollama_request_prefers_supported_non_thinking_schema_configuration(monkeypatch):
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    captured = {}
+    monkeypatch.setattr(
+        main.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeOllamaClient(
+            response=_FakeOllamaResponse(200),
+            captured=captured,
+        ),
+    )
+
+    result = asyncio.run(main._ollama_reply([], [], None, "test-model", {"name": "Headphones"}))
+
+    assert result == "A concise reflection."
+    payload = captured["json"]
+    assert payload["think"] is False
+    assert payload["format"]["type"] == "object"
+    assert payload["options"]["num_predict"] == 192
 
 
 def chat(message: str, session_id: str) -> dict:
@@ -78,6 +184,64 @@ def test_followup_facts_are_retained_and_questions_adapt(monkeypatch):
     assert second["session_facts"]["uses_per_week"] == 7
     assert second["reply"].count("?") <= 1
     assert "what price" not in second["reply"].lower()
+
+
+def test_natural_paraphrase_extracts_working_item_and_no_deadline(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    result = chat(
+        "I have something that works, this is an optional upgrade, and there is no deadline. "
+        "I can wait two months.",
+        "purchase-paraphrase-working-no-deadline",
+    )
+
+    facts = result["session_facts"]
+    assert facts["current"] == "I have something that works"
+    assert facts["current_condition"] == "works"
+    assert facts["existing_ownership"] is True
+    assert facts["urgency"] == "No deadline"
+    assert facts["purchase_timing"] == "not_urgent"
+    assert facts["waiting_period"] == "two months"
+    assert result["decision_state"]["recommendation"] == "WAIT"
+    assert "clarify the purchase price" in result["decision_state"]["recommendation_explanation"].lower()
+
+
+def test_negated_urgency_is_not_extracted_as_a_deadline(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    result = chat("What factors should I consider before buying a product I don't urgently need?", "negated-urgency")
+
+    assert result["session_facts"].get("purchase_timing") != "urgent"
+    assert result["session_facts"].get("urgency") != "A genuine deadline"
+
+
+def test_savings_and_emi_amounts_do_not_overwrite_product_price(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    savings = chat(
+        "I want headphones for ₹8,000. My current pair works fine, and I want to keep at least ₹15,000 in savings.",
+        "savings-is-not-price",
+    )
+    assert savings["session_facts"]["price"] == 8000
+    assert savings["session_facts"]["savings_allocated"] == 15000
+    assert not main.chat_facts["savings-is-not-price"].get("conflicts")
+
+    emi = chat(
+        "I want a gaming laptop for ₹95,000. My monthly income is ₹30,000 and expenses are ₹22,000. What if the EMI is ₹8,000 per month?",
+        "emi-is-not-price",
+    )
+    assert emi["session_facts"]["price"] == 95000
+    assert emi["session_facts"]["recurring_monthly"] == 8000
+
+
+def test_lower_cost_alternative_price_is_preserved_without_overwriting_target(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    first = chat(
+        "I want a ₹8,000 pair of headphones. My current headphones work fine, and I want to keep at least ₹15,000 in savings.",
+        "alternative-memory",
+    )
+    second = chat("I found a cheaper pair for ₹5,000.", "alternative-memory")
+
+    assert first["session_facts"]["price"] == 8000
+    assert second["session_facts"]["price"] == 8000
+    assert second["session_facts"]["alternative_prices"] == [5000]
 
 
 def test_correction_replaces_outdated_fact(monkeypatch):
@@ -280,6 +444,7 @@ def test_exact_optional_upgrade_message_preserves_savings_social_pressure_and_wa
     assert facts["current"] == "I have something that works"
     assert facts["need"] == "Useful improvement"
     assert facts["savings_adequacy"] == "reported_sufficient"
+    assert facts["external_pressure"] is True
     assert facts.get("user_affordability") is None
     assert facts["urgency"] == "Social pressure or FOMO"
     assert facts["purchase_timing"] == "not_urgent"
@@ -347,6 +512,8 @@ def test_real_world_regression_preserves_optional_upgrade_and_useful_followup(mo
     facts = result["session_facts"]
     assert facts["need"] == "Useful improvement"
     assert facts["need_classification"] == "Optional or preference-driven upgrade"
+    assert facts["essential_expenses_affected"] is False
+    assert facts["external_pressure"] is True
     assert "stated practical need" not in facts["motivation"]
     assert "sound quality" in facts["motivation"]
     assert facts["waiting_period"] == "one month"
@@ -385,6 +552,10 @@ def test_real_world_regression_preserves_gaming_goal_wait_window_and_expenses(mo
     assert "better gaming performance" in facts["motivation"]
     assert facts["need_classification"] == "Functional upgrade"
     assert facts["upcoming_expenses"] is True
+    assert facts["urgency"] == "A sale or countdown"
+    assert facts["external_pressure"] is True
+    assert facts["current"] == "It works, but has limitations"
+    assert facts["alternatives_checked"] is False
     assert facts["waiting_period"] == "two months"
     assert facts["budget_status"] == "unknown"
     assert state["recommendation"] == "WAIT"

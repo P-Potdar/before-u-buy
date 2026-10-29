@@ -1,0 +1,26 @@
+{
+  "source_name": "stephaniestv/Electronics_Product_Review_With_Sentiment",
+  "source_url": "https://huggingface.co/datasets/stephaniestv/Electronics_Product_Review_With_Sentiment",
+  "download_url": "https://huggingface.co/datasets/stephaniestv/Electronics_Product_Review_With_Sentiment/resolve/main/amazon_electronics_review_sentiment.csv?download=true",
+  "dataset_commit": "778bd6e",
+  "retrieved_at_utc": "2026-10-28T13:50:19.144037+00:00",
+  "declared_license": "Apache-2.0 (dataset repository); underlying Amazon/McAuley source terms require separate review",
+  "original_source_attribution": "Dataset card attributes raw data to the Amazon Product Review dataset by McAuley Lab.",
+  "download_method": "streamed official Hugging Face CSV; bounded retained sample",
+  "download_sha256_of_retained_source_rows": "ce3070912c0209368ce4316db154d1164e1caeafffe25d33aec629cb54d6a4fb",
+  "records_retained": 4933,
+  "records_rejected_missing_text": 65,
+  "records_scanned": 175907,
+  "source_sentiment_buckets": {
+    "Negative": 1666,
+    "Neutral": 1666,
+    "Positive": 1666
+  },
+  "max_records": 5000,
+  "max_bytes_accounted": 220000000,
+  "provenance_limitations": [
+    "The repository declares Apache-2.0, but the underlying Amazon review material may have additional terms.",
+    "The source page says review_sentiment was classified with Mistral Large Language Model; it is retained as a source annotation, not independently verified truth.",
+    "No reviewer identifiers are retained."
+  ]
+}

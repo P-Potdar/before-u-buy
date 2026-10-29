@@ -1,7 +1,15 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from main import AssessmentInput, ScoringContext, evaluate, recommend_purchase
+from main import (
+    AssessmentInput,
+    ScoringContext,
+    calculate_purchase_pressure,
+    calculate_regret_risk,
+    classify_sentiment,
+    evaluate,
+    recommend_purchase,
+)
 import pytest
 
 
@@ -58,6 +66,27 @@ def test_working_alternative_and_promo_urgency_add_caution():
     result = evaluate(AssessmentInput(name="Upgrade", price=1000, current="I have something that works", urgency="A sale or countdown"))
     assert result.recommendation == "Some factors may merit reflection"
     assert any("urgency" in f.lower() for f in result.factors)
+
+
+def test_wait_explanation_mentions_only_pressure_that_was_stated():
+    no_pressure = evaluate(AssessmentInput(
+        name="Laptop",
+        price=95000,
+        current="It works, but has limitations",
+        purchase_timing="not_urgent",
+        waiting_period="two months",
+    ))
+    sale_pressure = evaluate(AssessmentInput(
+        name="Laptop",
+        price=95000,
+        current="It works, but has limitations",
+        urgency="A sale or countdown",
+        purchase_timing="not_urgent",
+        waiting_period="two months",
+    ))
+
+    assert "external pressure" not in no_pressure.decision_explanation.lower()
+    assert "sale deadline" in sale_pressure.decision_explanation.lower()
 
 
 def test_cost_per_use_is_missing_until_usage_is_supplied():
@@ -142,3 +171,51 @@ def test_risk_score_is_bounded_and_explained():
     assert 0 <= result.regret_risk["score"] <= 100
     assert result.regret_risk["factors"]
     assert "not a probability" in result.regret_risk["explanation"]
+
+
+def test_pressure_and_regret_scores_have_explicit_boundary_behavior():
+    neutral = AssessmentInput(name="Item", price=100)
+    assert calculate_purchase_pressure(neutral, classify_sentiment(""))["score"] == 0
+    assert calculate_purchase_pressure(neutral, classify_sentiment(""))["band"] == "low"
+
+    moderate_pressure = AssessmentInput(name="Item", price=100, urgency="A sale or countdown")
+    pressure = calculate_purchase_pressure(moderate_pressure, classify_sentiment(""))
+    assert pressure["score"] == 30
+    assert pressure["band"] == "moderate"
+
+    high_pressure = AssessmentInput(
+        name="Item",
+        price=100,
+        urgency="A sale or countdown",
+        current="Mine is broken or unusable",
+        scenario="I feel stressed about the sale",
+    )
+    pressure = calculate_purchase_pressure(high_pressure, classify_sentiment(high_pressure.scenario))
+    assert pressure["score"] == 65
+    assert pressure["band"] == "high"
+
+    regret_boundary = AssessmentInput(
+        name="Item",
+        price=100,
+        urgency="Social pressure or FOMO",
+        current="I have something that works",
+        need="Mostly a want",
+    )
+    regret = calculate_regret_risk(regret_boundary, classify_sentiment(""))
+    assert regret["score"] == 50
+    assert regret["band"] == "higher reflection signal"
+
+    capped = AssessmentInput(
+        name="Item",
+        price=200,
+        budget=100,
+        urgency="Social pressure or FOMO",
+        current="It works, but has limitations",
+        need="Mostly a want",
+        alternatives_checked=False,
+        repair_investigated=False,
+        scenario="I feel stressed and emotional",
+    )
+    regret = calculate_regret_risk(capped, classify_sentiment(capped.scenario))
+    assert sum(item["points"] for item in regret["factors"]) == 115
+    assert regret["score"] == 100
