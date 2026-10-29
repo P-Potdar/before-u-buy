@@ -830,14 +830,10 @@ async def _process_chat(request: ChatRequest, session_id: str) -> dict[str, obje
         answer = _fallback_reply(request.message, sentiment, sources, facts, assessment)
         fallback_occurred = provider in {"ollama", "gemini", "none"}
 
-    if "?" not in answer:
-        follow_up = _next_chat_question(facts)
-        if follow_up is not None:
-            topic, question = follow_up
-            answer = f"{answer.rstrip()} {question}"
-            asked_topics = facts.setdefault("asked_topics", [])
-            if isinstance(asked_topics, list) and topic not in asked_topics:
-                asked_topics.append(topic)
+    # The model may incorrectly claim that no question is needed, or ask an
+    # unrelated question. The application state is authoritative: if a useful
+    # follow-up remains, always finish with that one question.
+    answer = _ensure_required_follow_up(answer, facts)
     answer = _remove_redundant_question(_single_question_only(answer), facts)
     answer = _single_question_only(answer)
     _mark_asked_topics(facts, answer)
@@ -902,6 +898,36 @@ def _single_question_only(text: str) -> str:
         elif character == "?" and not quoted:
             return text[: index + 1].rstrip()
     return text
+
+
+def _ensure_required_follow_up(text: str, facts: dict[str, object]) -> str:
+    """Keep the one-question contract based on missing facts, not model prose."""
+    follow_up = _next_chat_question(facts)
+    if follow_up is None:
+        return text
+
+    topic, question = follow_up
+    lowered = text.casefold()
+    topic_patterns = {
+        "price": r"\b(?:price|cost|how much)\b",
+        "affordability": r"\b(?:budget|afford|financial)\b",
+        "repair": r"\brepair(?:ing|able| feasibility)?\b",
+        "use_case": r"\b(?:what would you mainly use|what task|use it for)\b",
+        "existing_ownership": r"\b(?:already have|already own|current one)\b",
+        "current_condition": r"\b(?:condition|how well does it work|practical limitation)\b",
+        "motivation": r"\b(?:benefit|reason|motivation|what draws you)\b",
+        "alternatives": r"\b(?:alternative|cheaper|lower-cost|improvement)\b",
+        "usage": r"\b(?:how often|frequency|lifespan|how many years)\b",
+    }
+    # Preserve a model question only when it addresses the same pending topic.
+    if "?" in text and re.search(topic_patterns.get(topic, r"$^"), lowered):
+        return text
+
+    # Remove an unrelated trailing model question so the user receives only
+    # one relevant question, as requested by the conversation contract.
+    if "?" in text:
+        text = text.rsplit("?", 1)[0].rstrip()
+    return f"{text.rstrip()} {question}".strip()
 
 
 def _remove_redundant_question(text: str, facts: dict[str, object]) -> str:
@@ -2437,32 +2463,35 @@ def _fallback_reply(
     ))
     if recommendation_request and isinstance(decision_state, dict):
         recommendation = str(decision_state.get("recommendation", "WAIT"))
+        item_label = str(known.get("name") or "item").lower()
         reasons = []
         if known.get("user_affordability") == "reported_not_affordable":
             reasons.append("you reported that it is not comfortably affordable")
-        if known.get("current") == "I have something that works":
-            reasons.append("your current headphones still work")
+        if known.get("current") in {"I have something that works", "It works, but has limitations"}:
+            reasons.append(f"your current {item_label} still works")
         if known.get("urgency") in {"A sale or countdown", "Social pressure or FOMO"}:
             reasons.append("the immediate pressure comes from timing or social influence")
         reason_text = "; ".join(reasons) or "the decision-relevant facts remain incomplete"
         return (
             f"My recommendation is {recommendation}. That follows from {reason_text}. "
-            "Your excitement is understandable, but the new headphones' incremental benefit is still unknown. "
+            f"Your interest is understandable, but the new {item_label}'s incremental benefit is still unknown. "
             "Reconsider when the purchase fits your budget and the added benefit is clear."
         )
 
     if known.get("resolved_pending_topic") == "usage" and isinstance(known.get("lifespan_years"), (int, float)):
         years = float(known["lifespan_years"])
+        item_label = str(known.get("name") or "item").lower()
         return (
             f"Thanks — I’ll use an expected lifespan of {years:g} years. "
-            "That helps with the cost-per-use estimate when usage frequency is known. "
-            "What practical limitation, if any, does your current pair have?"
+            f"That helps with the cost-per-use estimate when usage frequency is known. "
+            f"What practical limitation, if any, does your current {item_label} have?"
         )
 
     if known.get("resolved_pending_topic") == "motivation":
+        item_label = str(known.get("name") or "item").lower()
         return (
-            "Understood — social pressure is part of the motivation, separate from the headphones’ practical value. "
-            "That supports keeping the deterministic WAIT reflection while you check whether the new pair solves a specific problem."
+            f"Understood — social pressure is part of the motivation, separate from the {item_label}'s practical value. "
+            f"That supports keeping the deterministic WAIT reflection while you check whether the new {item_label} solves a specific problem."
         )
 
     if any(term in lowered for term in (
